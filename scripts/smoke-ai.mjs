@@ -22,7 +22,7 @@ const step = msg => console.log('✓', msg);
 const server = createServer((req, res) => {
   res.setHeader('content-type', 'text/html');
   const body = req.url === '/long'
-    ? `<article><h1>Long read</h1>${Array.from({ length: 60 }, (_, i) => `<p>Paragraph ${i} ${'lorem ipsum '.repeat(30)}</p>`).join('')}</article>`
+    ? `<main><h1>Long read</h1><span class="State" title="Status: Merged">Merged</span><article><p>One comment</p></article>${Array.from({ length: 60 }, (_, i) => `<p>Paragraph ${i} ${'lorem ipsum '.repeat(30)}</p>`).join('')}<form><h3 class="status-heading">Pull request successfully merged and closed</h3></form></main>`
     : `<nav>Site menu</nav><main><h1>${req.url}</h1><p>The secret phrase on ${req.url} is purple-otter.</p></main><footer>Footer</footer>`;
   res.end(`<!doctype html><html lang="en"><title>Page ${req.url}</title>${body}`);
 }).listen(0);
@@ -194,6 +194,9 @@ try {
   assert.doesNotMatch(alphaCall.text, /PR rule/);
   assert.doesNotMatch(alphaCall.text, /Site menu|Footer/);
   assert.ok(longCall.text.length < 7000, 'long pages are trimmed for the on-device model');
+  assert.match(longCall.text, /Page state: Status: Merged/, 'state badges are read and put first');
+  assert.match(longCall.text, /successfully merged and closed/, 'the end of a long page (merge box) is kept');
+  assert.match(longCall.text, /Paragraph 3 /, 'the whole main area is read, not just one comment');
   assert.match(calls.find(c => !c.json).system, /ONE short sentence/);
   step('Summarize group: one sentence per tab and for the group, statuses from the AI, URL rule only on matching pages');
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-group-page.png') });

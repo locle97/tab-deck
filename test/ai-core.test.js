@@ -4,7 +4,7 @@ import {
   normalizeSettings, groupKey, instructionsFor, chooseEngine, cleanText, chunkText, langCode, isReadableUrl,
   tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, cacheKey, pruneCache, renderSummary,
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
-  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, needsInsight,
+  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, needsInsight, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
 } from '../src/lib/ai-core.js';
 
 test('normalizeSettings fills defaults and drops bad values', () => {
@@ -212,4 +212,28 @@ test('geminiRequest asks for JSON with a status enum when json is set', () => {
   assert.equal(r.body.generationConfig.responseMimeType, 'application/json');
   assert.deepEqual(r.body.generationConfig.responseSchema.properties.status.enum, ['action', 'working', 'waiting', 'done', 'info', 'unknown']);
   assert.equal(geminiRequest({ model: 'm', system: 's', user: 'u' }).body.generationConfig.responseMimeType, undefined);
+});
+
+test('summary and status come from one analysis: facts first, then summary, then status', () => {
+  assert.deepEqual(Object.keys(INSIGHT_SCHEMA.properties), ['facts', 'summary', 'status']);
+  const g = geminiRequest({ model: 'm', system: 's', user: 'u', json: true }).body.generationConfig.responseSchema;
+  assert.deepEqual(g.propertyOrdering, ['facts', 'summary', 'status']);
+  const p = tabPrompt({ title: 'Fix login · Pull Request #5', url: 'https://github.com/a/b/pull/5', text: 'Page state: Merged\n\nbody' });
+  const all = (p.system + '\n' + p.user).toLowerCase();
+  assert.match(all, /facts/);
+  assert.match(all, /page state/);
+  assert.match(all, /agree/);
+  assert.ok(PROMPT_VERSION >= 3);
+});
+
+test('parseInsight keeps short facts; headTail keeps both ends of long pages', () => {
+  const r = parseInsight('{"facts":"PR merged by bob","summary":"The login fix PR was merged.","status":"done"}');
+  assert.deepEqual(r, { facts: 'PR merged by bob', summary: 'The login fix PR was merged.', status: 'done' });
+  assert.ok(parseInsight(JSON.stringify({ facts: 'x'.repeat(500), summary: 'A page about things.', status: 'info' })).facts.length <= 160);
+  const long = 'HEAD' + 'a'.repeat(20000) + 'TAIL';
+  const ht = headTail(long, 6000);
+  assert.ok(ht.length <= 6010);
+  assert.ok(ht.startsWith('HEAD'));
+  assert.ok(ht.endsWith('TAIL'));
+  assert.equal(headTail('short', 6000), 'short');
 });

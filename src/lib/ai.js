@@ -7,7 +7,7 @@ import {
   DEFAULT_SETTINGS, normalizeSettings, instructionsFor, chooseEngine, cleanText, langCode,
   isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, userInstructionBlock,
   cacheKey, fnv, pruneCache, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
-  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX,
+  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
 } from './ai-core.js';
 
 const SETTINGS_KEY = 'aiSettings';
@@ -74,18 +74,32 @@ export const revokePageAccess = () => chrome.permissions.remove({ origins: PAGE_
 
 // Runs inside the page. Must be self-contained.
 function extractInPage() {
-  const pick = document.querySelector('article, main, [role=main]') || document.body;
+  // Prefer the page's main area. (Not the first <article>: on apps like GitHub that can be a single
+  // comment, which hides the pull request's own state.)
+  const pick = document.querySelector('main, [role=main]') || document.querySelector('article') || document.body;
   let text = '';
   if (pick) {
     const clone = pick.cloneNode(true);
-    clone.querySelectorAll('nav, header, footer, aside, script, style, noscript, form, svg, iframe, [aria-hidden=true], [hidden]').forEach(n => n.remove());
+    // Drop page chrome, but keep <form> and in-page <header>: apps put real state in them
+    // (GitHub's merge box and review status, a PR's title and Open/Merged badge).
+    clone.querySelectorAll('nav, footer, aside, script, style, noscript, template, svg, iframe, [role=navigation], [role=contentinfo], [aria-hidden=true], [hidden]').forEach(n => n.remove());
     // innerText needs layout; a detached clone has none, so fall back to textContent with block breaks.
-    clone.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, br, div, section, tr').forEach(n => n.append('\n'));
+    clone.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, br, div, section, tr, header, form').forEach(n => n.append('\n'));
     text = clone.textContent || '';
     if (text.trim().length < 50 && document.body) text = document.body.innerText || text;
   }
+  // Short status signals the page shows on badges and in status areas, e.g. GitHub's
+  // "Status: Merged", "Review required", "All checks have passed". Put first so they're never cut off.
+  const seen = new Set();
+  const states = [];
+  const sel = '[title^="Status:" i], .State, [class*="StateLabel"], [data-testid*="state" i], [data-status], [aria-label^="Status" i], .merge-status-list .status-heading, .mergeability-details .status-heading, .branch-action-item .status-heading, [class*="MergeBox"] h3, [class*="mergeBox"] h3';
+  for (const el of document.querySelectorAll(sel)) {
+    const v = (el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (v && v.length <= 120 && !seen.has(v.toLowerCase())) { seen.add(v.toLowerCase()); states.push(v); }
+    if (states.length >= 8) break;
+  }
   const desc = document.querySelector('meta[name=description], meta[property="og:description"]')?.content || '';
-  return { title: document.title, lang: document.documentElement.lang || '', desc, text: text.slice(0, 120000) };
+  return { title: document.title, lang: document.documentElement.lang || '', desc, states, text: text.slice(0, 120000) };
 }
 
 /**
@@ -102,7 +116,8 @@ export async function extractTab(tab, { access }) {
     const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: extractInPage });
     const r = res?.result;
     if (!r) return { ...base, reason: 'failed' };
-    const text = cleanText([r.desc, r.text].filter(Boolean).join('\n\n')).slice(0, 100000);
+    const states = Array.isArray(r.states) && r.states.length ? `Page state: ${r.states.join(' · ')}` : '';
+    const text = cleanText([states, r.desc, r.text].filter(Boolean).join('\n\n')).slice(0, 100000);
     return { ...base, title: r.title || base.title, lang: langCode(r.lang), text, readable: text.length > 0, reason: text ? '' : 'empty' };
   } catch {
     return { ...base, reason: 'restricted' };
@@ -248,7 +263,7 @@ function getSummarizer(opts, onProgress) {
 }
 
 async function localInsight(page, instructions, { api, signal, onProgress }) {
-  const text = page.text ? page.text.slice(0, 6000) : '';
+  const text = page.text ? headTail(page.text, 6000) : '';
   if (api === 'prompt') {
     const base = await getBaseSession(onProgress);
     const s = await base.clone({ signal });
@@ -368,7 +383,7 @@ export async function summarizeTab(tab, opts = {}) {
   const engine = opts.engine || pickEngine('tab', st.settings, st.local, st.hasKey);
   const page = await extractTab(tab, { access: opts.access });
   const instructions = instructionsFor(st.settings, opts.groupName, page.url);
-  const sig = cacheKey([engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, fnv(page.text), page.title]);
+  const sig = cacheKey([PROMPT_VERSION, engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, fnv(page.text), page.title]);
   const prev = tabInsight(page.url);
   if (!opts.force && prev?.sig === sig && prev.summary) return putInsight(page.url, {});
   let r;
@@ -379,7 +394,14 @@ export async function summarizeTab(tab, opts = {}) {
     r = await localInsight(page, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress });
   }
   if (!r.summary) throw new AiError('The AI returned an empty summary.', 'empty');
-  return putInsight(page.url, { summary: r.summary, status: r.status, engine, sig, reason: page.reason, readable: page.readable, title: page.title });
+  // A status set by hand was about the page as it was. The page has changed, so the new analysis wins:
+  // otherwise a stale "Needs you" sits next to a summary that says the PR is merged.
+  const changed = prev && prev.textSig && prev.textSig !== fnv(page.text);
+  return putInsight(page.url, {
+    summary: r.summary, status: r.status, facts: r.facts || '', engine, sig, textSig: fnv(page.text),
+    reason: page.reason, readable: page.readable, title: page.title,
+    ...(changed || opts.force ? { manual: undefined } : {}),
+  });
 }
 
 /**
