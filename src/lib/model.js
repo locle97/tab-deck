@@ -266,18 +266,8 @@ export function sortTabsBy(tabs, rankOf) {
   return tabs.map((t, i) => ({ t, i })).sort((a, b) => rankOf(a.t) - rankOf(b.t) || a.i - b.i).map(x => x.t);
 }
 
-/**
- * Split dashboard groups into the cards shown in the grid (`main`) and the finished ones folded into
- * a "Done" row at the bottom (`done`). A status filter shows only the groups with that status.
- */
-export function dashboardSections(groups, statusOf, { filter = null, foldDone = true } = {}) {
-  if (filter) return { main: groups.filter(g => statusOf(g) === filter), done: [] };
-  if (!foldDone) return { main: groups, done: [] };
-  return { main: groups.filter(g => statusOf(g) !== 'done'), done: groups.filter(g => statusOf(g) === 'done') };
-}
-
 /** How many items have each status: {action: 2, done: 1}. Items with no status are counted under 'none'. */
-export function countBy(items, statusOf) {
+function countBy(items, statusOf) {
   const out = {};
   for (const x of items) { const s = statusOf(x) || 'none'; out[s] = (out[s] || 0) + 1; }
   return out;
