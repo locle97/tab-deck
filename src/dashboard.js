@@ -1,6 +1,6 @@
 import {
   COLORS, COLOR_NAMES, buildModel, allTabs, findDuplicates, duplicateCount, domainProposals,
-  hostOf, shortUrl, siteName, plural, timeAgo, nextColor, score, savedLabel,
+  hostOf, shortUrl, siteName, plural, timeAgo, nextColor, score, savedLabel, groupMoveTarget, neighborMove,
 } from './lib/model.js';
 import * as A from './lib/actions.js';
 import { listWorkspaces, onWorkspacesChanged } from './lib/workspaces.js';
@@ -17,6 +17,16 @@ let view = { kind: 'group', id: null };
 let selected = new Set();
 let renaming = false;
 let deferred = false;
+let dragging = null; // id of the group being dragged in the sidebar
+
+// Sidebar groups opened to show their tabs. Remembered per browser; it is only a convenience.
+const EXPANDED_KEY = 'tabdesk.expandedGroups';
+const expanded = new Set((() => { try { return JSON.parse(localStorage.getItem(EXPANDED_KEY)) || []; } catch { return []; } })());
+function saveExpanded() {
+  const live = new Set(model.groups.map(g => g.id));
+  for (const id of expanded) if (!live.has(id)) expanded.delete(id);
+  try { localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expanded])); } catch {}
+}
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -35,7 +45,7 @@ async function refresh() {
   if (view.kind === 'group' && !groupById(view.id)) {
     view = model.groups[0] ? { kind: 'group', id: model.groups[0].id } : { kind: 'inbox' };
   }
-  if (renaming) { deferred = true; return; }
+  if (renaming || dragging != null) { deferred = true; return; }
   render();
   if (!$('#pal').hidden) renderPalette();
 }
@@ -108,6 +118,18 @@ const doRestore = ws => perform(async () => {
 
 const doFocus = g => perform(() => A.focusGroup(g, model));
 
+/** Move group `id` before or after group `targetId`, in the real tab strip. */
+function doMoveGroup(id, targetId, place, refocus = false) {
+  const g = groupById(id);
+  const to = g && groupMoveTarget(model.groups, id, targetId, place);
+  if (!to) return;
+  const crossWindow = to.windowId !== g.windowId;
+  perform(async () => {
+    const undo = await A.moveGroup(g, to);
+    return { msg: `Moved “${esc(g.name)}”${crossWindow ? ' to another window' : ''}`, undo };
+  }).then(() => { if (refocus) document.querySelector(`[data-nav=group][data-id="${id}"]`)?.focus(); });
+}
+
 /* ---------- favicons ---------- */
 function hash(s) { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); }
 function fav(url = '') {
@@ -135,6 +157,7 @@ const ICON = {
   inbox: '<svg class="inbox-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h5l1.5 3h5L16 13h5M5 5h14l2 8v6H3v-6l2-8Z"/></svg>',
   stack: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></svg>',
   bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3 4 14h7l-1 7 9-11h-7l1-7Z"/></svg>',
+  chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
   go: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>',
 };
 
@@ -152,8 +175,19 @@ function renderSide() {
   h += `<div class="nav-label"><span>Open groups</span><span>${model.groups.length}</span></div><div class="nav-scroll"><div class="nav-items">`;
   if (!model.groups.length) h += `<div class="mock-note" style="padding:4px 8px">No tab groups yet. Select tabs in the Inbox and move them to a new group.</div>`;
   model.groups.forEach((g, i) => {
-    h += `<button class="nav-item" data-nav="group" data-id="${g.id}" aria-current="${cur('group', g.id)}" style="--c:${cvar(g.color)}" type="button" title="${esc(g.name)}">
-      <span class="dot"></span><span class="name">${esc(g.name)}</span>${multiWin ? `<span class="win-tag">W${g.window}</span>` : ''}${i < 9 ? `<span class="hot">Alt ${i + 1}</span>` : ''}<span class="count">${g.tabs.length}</span></button>`;
+    const open = expanded.has(g.id);
+    h += `<div class="nav-group${dragging === g.id ? ' is-dragging' : ''}" data-gid="${g.id}" style="--c:${cvar(g.color)}">
+      <div class="nav-row" draggable="true" title="Drag to reorder. Alt+↑/↓ moves the group in the tab strip.">
+      <button class="chev" data-side="toggle" type="button" aria-expanded="${open}" aria-label="${open ? 'Hide' : 'Show'} tabs in ${esc(g.name)}">${ICON.chev}</button>
+      <button class="nav-item" data-nav="group" data-id="${g.id}" aria-current="${cur('group', g.id)}" type="button" title="${esc(g.name)}">
+      <span class="dot"></span><span class="name">${esc(g.name)}</span>${multiWin ? `<span class="win-tag">W${g.window}</span>` : ''}${i < 9 ? `<span class="hot">Alt ${i + 1}</span>` : ''}<span class="count">${g.tabs.length}</span></button></div>`;
+    if (open) {
+      h += `<ul class="nav-tabs">${g.tabs.map(t => {
+        const url = t.url || t.pendingUrl || '';
+        return `<li><button class="nav-tab${t.active ? ' is-active' : ''}" data-side-tab="${t.id}" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="name">${esc(titleOf(t))}</span></button></li>`;
+      }).join('')}</ul>`;
+    }
+    h += `</div>`;
   });
   h += `</div></div>`;
   h += `<div class="nav-label"><span>Workspaces</span><span>${workspaces.length} saved</span></div><div class="nav-scroll"><div class="nav-items">`;
@@ -366,6 +400,20 @@ function openByDomain() {
 /* ---------- events ---------- */
 document.addEventListener('click', e => {
   if (menuEl && !menuEl.contains(e.target)) closeMenu();
+  const side = e.target.closest('[data-side], [data-side-tab]');
+  if (side) {
+    if (side.dataset.sideTab) {
+      const x = tabById(+side.dataset.sideTab);
+      if (x) perform(() => A.activateTab(x.t));
+      return;
+    }
+    const gid = +side.closest('[data-gid]').dataset.gid;
+    expanded.has(gid) ? expanded.delete(gid) : expanded.add(gid);
+    saveExpanded();
+    renderSide();
+    document.querySelector(`[data-gid="${gid}"] .chev`)?.focus();
+    return;
+  }
   const nav = e.target.closest('[data-nav]');
   if (nav) {
     const k = nav.dataset.nav;
@@ -456,11 +504,65 @@ document.addEventListener('keydown', e => {
     if (menuEl) return closeMenu();
     if (!$('#modal').hidden) return closeModal();
   }
+  if (e.altKey && !mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    const gEl = e.target.closest?.('#nav [data-gid]');
+    const m = gEl && neighborMove(model.groups, +gEl.dataset.gid, e.key === 'ArrowUp' ? -1 : 1);
+    if (gEl) e.preventDefault();
+    if (m) doMoveGroup(+gEl.dataset.gid, m.targetId, m.place, true);
+    return;
+  }
   if (e.altKey && /^Digit[1-9]$/.test(e.code) && $('#pal').hidden) {
     const g = model.groups[+e.code.slice(5) - 1];
     if (g) { e.preventDefault(); setView({ kind: 'group', id: g.id }); }
   }
 });
+/* ---------- sidebar drag to reorder groups ---------- */
+const DRAG_TYPE = 'application/x-tabdesk-group';
+const navEl = $('#nav');
+function clearDropMarks() { navEl.querySelectorAll('.drop-before, .drop-after').forEach(n => n.classList.remove('drop-before', 'drop-after')); }
+function dropPlace(gEl, e) {
+  const r = gEl.querySelector('.nav-row').getBoundingClientRect();
+  return e.clientY < r.top + r.height / 2 ? 'before' : 'after';
+}
+navEl.addEventListener('dragstart', e => {
+  const row = e.target.closest?.('.nav-row');
+  if (!row) return;
+  const gEl = row.closest('[data-gid]');
+  dragging = +gEl.dataset.gid;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData(DRAG_TYPE, String(dragging));
+  e.dataTransfer.setDragImage(row, 16, row.offsetHeight / 2);
+  requestAnimationFrame(() => gEl.classList.add('is-dragging'));
+});
+navEl.addEventListener('dragover', e => {
+  if (dragging == null || !e.dataTransfer.types.includes(DRAG_TYPE)) return;
+  const gEl = e.target.closest?.('[data-gid]');
+  if (!gEl) return;
+  e.preventDefault();
+  const place = dropPlace(gEl, e);
+  const ok = !!groupMoveTarget(model.groups, dragging, +gEl.dataset.gid, place);
+  e.dataTransfer.dropEffect = ok ? 'move' : 'none';
+  clearDropMarks();
+  if (ok) gEl.classList.add(`drop-${place}`);
+});
+navEl.addEventListener('dragleave', e => { if (!navEl.contains(e.relatedTarget)) clearDropMarks(); });
+navEl.addEventListener('drop', e => {
+  const gEl = e.target.closest?.('[data-gid]');
+  if (dragging == null || !gEl) return;
+  e.preventDefault();
+  const id = dragging;
+  const place = dropPlace(gEl, e);
+  endDrag();
+  doMoveGroup(id, +gEl.dataset.gid, place);
+});
+navEl.addEventListener('dragend', endDrag);
+function endDrag() {
+  if (dragging == null) return;
+  dragging = null;
+  clearDropMarks();
+  if (deferred) { deferred = false; refresh(); } else renderSide();
+}
+
 document.addEventListener('focusout', e => { if (e.target.id === 'renameInput') commitRename(); });
 
 function finishRename() {

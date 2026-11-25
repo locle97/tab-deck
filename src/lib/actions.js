@@ -128,6 +128,16 @@ export async function setGroupColor(group, color) {
   return async () => { await chrome.tabGroups.update(group.id, { color: old }); };
 }
 
+/**
+ * Move a whole group in the tab strip, possibly to another window.
+ * `to` comes from model.groupMoveTarget.
+ */
+export async function moveGroup(group, to) {
+  const from = { windowId: group.windowId, index: group.tabs[0].index };
+  await chrome.tabGroups.move(group.id, to);
+  return async () => { await chrome.tabGroups.move(group.id, from); };
+}
+
 export async function setCollapsed(group, collapsed) {
   await chrome.tabGroups.update(group.id, { collapsed });
 }

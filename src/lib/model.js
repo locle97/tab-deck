@@ -194,3 +194,32 @@ export function savedLabel(ms, now = Date.now()) {
   const sameYear = d.getFullYear() === new Date(now).getFullYear();
   return d.toLocaleDateString('en-US', sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
 }
+
+/**
+ * Where to send a group so it lands next to another group in the tab strip.
+ * Returns {windowId, index} for chrome.tabGroups.move, where `index` is the
+ * position of the group's first tab after the move, or null when the group
+ * would not move. `place` is 'before' or 'after' the target group.
+ */
+export function groupMoveTarget(groups, groupId, targetId, place) {
+  const src = groups.find(g => g.id === groupId);
+  const dst = groups.find(g => g.id === targetId);
+  if (!src || !dst || src.id === dst.id || !src.tabs.length || !dst.tabs.length) return null;
+  const first = g => g.tabs[0].index;
+  const last = g => g.tabs[g.tabs.length - 1].index;
+  const sameWindow = src.windowId === dst.windowId;
+  // Within one window the group's own tabs leave the strip first, so
+  // everything after them shifts left by the group's size.
+  const shift = sameWindow && first(src) < first(dst) ? src.tabs.length : 0;
+  const index = (place === 'after' ? last(dst) + 1 : first(dst)) - shift;
+  if (sameWindow && index === first(src)) return null;
+  return { windowId: dst.windowId, index };
+}
+
+/** The group next to `groupId` in sidebar order, for keyboard reordering. */
+export function neighborMove(groups, groupId, dir) {
+  const i = groups.findIndex(g => g.id === groupId);
+  const n = groups[i + dir];
+  if (i < 0 || !n) return null;
+  return { targetId: n.id, place: dir < 0 ? 'before' : 'after' };
+}

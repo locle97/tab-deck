@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildModel, findDuplicates, duplicateCount, domainProposals, sortedBySite,
   score, timeAgo, nextColor, shortUrl, siteName, toWorkspace, UNTITLED,
+  groupMoveTarget, neighborMove,
 } from '../src/lib/model.js';
 
 const tab = (id, url, o = {}) => ({ id, url, title: `Tab ${id}`, windowId: 1, index: id, groupId: -1, active: false, ...o });
@@ -104,4 +105,49 @@ test('toWorkspace keeps name, color and tab URLs', () => {
   assert.equal(w.color, 'cyan');
   assert.equal(w.savedAt, 5);
   assert.deepEqual(w.tabs.map(t => t.url), ['https://a.com']);
+});
+
+// Window 1: [0 inbox] [1,2 = A] [3 inbox] [4 = B] [5,6,7 = C]; window 2: [0,1 = D]
+const strip = () => buildModel([
+  tab(1, 'https://x.com/0', { index: 0 }),
+  tab(2, 'https://x.com/1', { index: 1, groupId: 10 }),
+  tab(3, 'https://x.com/2', { index: 2, groupId: 10 }),
+  tab(4, 'https://x.com/3', { index: 3 }),
+  tab(5, 'https://x.com/4', { index: 4, groupId: 20 }),
+  tab(6, 'https://x.com/5', { index: 5, groupId: 30 }),
+  tab(7, 'https://x.com/6', { index: 6, groupId: 30 }),
+  tab(8, 'https://x.com/7', { index: 7, groupId: 30 }),
+  tab(9, 'https://y.com/0', { index: 0, groupId: 40, windowId: 2 }),
+  tab(10, 'https://y.com/1', { index: 1, groupId: 40, windowId: 2 }),
+], [10, 20, 30, 40].map(id => ({ id, title: `G${id}`, color: 'blue' }))).groups;
+
+test('groupMoveTarget moves a group left in its window', () => {
+  assert.deepEqual(groupMoveTarget(strip(), 30, 10, 'before'), { windowId: 1, index: 1 });
+  assert.deepEqual(groupMoveTarget(strip(), 30, 20, 'before'), { windowId: 1, index: 4 });
+});
+
+test('groupMoveTarget accounts for the group leaving when moving right', () => {
+  // A (2 tabs) after C: C ends at 7, so A's first tab ends up at 8 - 2 = 6.
+  assert.deepEqual(groupMoveTarget(strip(), 10, 30, 'after'), { windowId: 1, index: 6 });
+  assert.deepEqual(groupMoveTarget(strip(), 10, 20, 'after'), { windowId: 1, index: 3 });
+  assert.deepEqual(groupMoveTarget(strip(), 10, 30, 'before'), { windowId: 1, index: 3 });
+});
+
+test('groupMoveTarget returns null when nothing would change', () => {
+  assert.equal(groupMoveTarget(strip(), 10, 10, 'before'), null);
+  assert.equal(groupMoveTarget(strip(), 20, 30, 'before'), null);
+  assert.equal(groupMoveTarget(strip(), 30, 20, 'after'), null);
+  assert.equal(groupMoveTarget(strip(), 99, 10, 'before'), null);
+});
+
+test('groupMoveTarget moves a group to another window', () => {
+  assert.deepEqual(groupMoveTarget(strip(), 10, 40, 'after'), { windowId: 2, index: 2 });
+  assert.deepEqual(groupMoveTarget(strip(), 40, 10, 'before'), { windowId: 1, index: 1 });
+});
+
+test('neighborMove finds the group above or below', () => {
+  assert.deepEqual(neighborMove(strip(), 20, -1), { targetId: 10, place: 'before' });
+  assert.deepEqual(neighborMove(strip(), 20, 1), { targetId: 30, place: 'after' });
+  assert.equal(neighborMove(strip(), 10, -1), null);
+  assert.equal(neighborMove(strip(), 40, 1), null);
 });
