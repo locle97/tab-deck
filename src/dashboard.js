@@ -5,6 +5,7 @@ import {
 } from './lib/model.js';
 import * as A from './lib/actions.js';
 import { listWorkspaces, onWorkspacesChanged } from './lib/workspaces.js';
+import * as AIUI from './ai-ui.js';
 
 const SELF_URL = chrome.runtime.getURL('dashboard.html');
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
@@ -235,9 +236,10 @@ function tabRow(t, counts) {
     <div class="tab-text"><div class="tab-title"><span class="t">${esc(titleOf(t))}</span>${badges.join('')}</div><div class="tab-url">${urlHtml}</div></div>
     <span class="tab-meta">${ago ? (ago === 'now' ? 'Now' : `${ago} ago`) : ''}</span>
     <div class="tab-actions">
+      ${AIUI.tabSumButton(t)}
       <button class="icon-btn" data-act="move" type="button" title="Move to group" aria-label="Move to group">${ICON.move}</button>
       <button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close tab">${ICON.close}</button>
-    </div></li>`;
+    </div></li>${AIUI.tabSumRow(t)}`;
 }
 
 function bulkBar() {
@@ -274,10 +276,12 @@ function renderMain() {
         <button class="btn ghost" data-act="rename" type="button">${ICON.pen} Rename</button>
         <button class="btn" data-act="color" type="button"><span class="swatch"></span> Color</button>
         <button class="btn" data-act="group-more" type="button" aria-label="More group actions">${ICON.more}</button>
+        ${AIUI.groupSumButtons()}
         <button class="btn" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch to group</button>
         <button class="btn primary" data-act="save-close" type="button" title="Save this group as a workspace and close its tabs">${ICON.save} Save &amp; close</button>
       </div></div>`;
     h += bulkBar();
+    h += AIUI.groupSumCard(g);
     h += `<ul class="tabs">${g.tabs.map(t => tabRow(t, counts)).join('')}</ul>`;
     h += hints();
   } else if (view.kind === 'workspaces') {
@@ -320,11 +324,8 @@ function renderMain() {
 }
 
 /* ---------- dashboard ---------- */
-/**
- * Extra content under a card's header, between the facts line and the tab list.
- * Empty for now; a group summary (see docs/specs/ai-tab-summaries.md) can render here.
- */
-function cardSummary(g) { return ''; }
+/** The group's AI summary (or its instructions chip), between the facts line and the tab list. */
+const cardSummary = g => AIUI.groupSumCard(g);
 
 function cardTab(t) {
   const url = t.url || t.pendingUrl || '';
@@ -332,7 +333,7 @@ function cardTab(t) {
   return `<li class="card-tab${t.active ? ' is-active' : ''}${sleeping ? ' is-sleeping' : ''}" data-id="${t.id}">
     <button class="card-tab-btn" data-act="activate" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="t">${esc(titleOf(t))}</span>
     ${t.audible ? `<span class="card-ico" title="Playing audio">${ICON.audio}</span>` : ''}${t.active ? '<span class="live" title="The visible tab in its window"></span>' : ''}</button>
-    <button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close ${esc(titleOf(t))}">${ICON.close}</button></li>`;
+    ${AIUI.tabSumButton(t)}<button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close ${esc(titleOf(t))}">${ICON.close}</button></li>${AIUI.tabSumRow(t)}`;
 }
 
 function cardTabList(key, tabs) {
@@ -353,6 +354,7 @@ function groupCard(g) {
     <header class="card-head">
       <button class="card-name" data-act="open" type="button" title="Show ${esc(g.name)} in detail">${esc(g.name)}</button>
       ${model.windowCount > 1 ? `<span class="win-tag">W${g.window}</span>` : ''}
+      ${AIUI.cardSumButton()}
       <button class="btn sm" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch</button>
       <button class="icon-btn" data-act="card-more" type="button" title="More actions" aria-label="More actions for ${esc(g.name)}">${ICON.more}</button>
     </header>
@@ -442,6 +444,7 @@ function groupMenu(m, g, onCard = false) {
   }
   menuItem(m, '<span>Sort tabs by site</span>', () => perform(async () => ({ msg: 'Sorted tabs by site', undo: await A.sortGroupBySite(g) })));
   menuItem(m, `<span>${g.collapsed ? 'Expand' : 'Collapse'} in tab strip</span>`, () => perform(() => A.setCollapsed(g, !g.collapsed)));
+  AIUI.groupMenuItems(g).forEach(it => menuItem(m, it.html, it.run));
   menuItem(m, '<span>Ungroup (move tabs to Inbox)</span>', () => perform(async () => {
     const undo = await A.ungroupGroup(g);
     if (!onCard) view = { kind: 'inbox' };
@@ -586,6 +589,8 @@ function handleAction(act, row, e) {
       const w = ws();
       return perform(async () => ({ msg: `Deleted workspace “${esc(w.name)}”`, undo: await A.deleteWorkspace(w) }));
     }
+    default:
+      if (a.startsWith('ai-')) { e.stopPropagation(); AIUI.handleAiAction(a, act, row, g); }
   }
 }
 
@@ -673,6 +678,7 @@ function commitRename() {
   renaming = false;
   if (g && v !== g.title) {
     const old = g.name;
+    if (v) AIUI.onGroupRenamed(old, v);
     perform(async () => ({ msg: `Renamed “${esc(old)}” to “${esc(v || 'Untitled group')}”`, undo: await A.renameGroup(g, v) }));
   } else finishRename();
 }
@@ -706,6 +712,7 @@ function commands() {
   c.push({ type: 'cmd', label: 'Show dashboard', sub: `All ${plural(model.groups.length, 'open group')} on one page`, ico: ICON.grid.replace('class="grid-ico"', ''), run: () => setView({ kind: 'dashboard' }) });
   c.push({ type: 'cmd', label: 'Go to Inbox', sub: plural(model.inbox.length, 'ungrouped tab'), ico: ICON.inbox.replace('class="inbox-ico"', ''), run: () => setView({ kind: 'inbox' }) });
   c.push({ type: 'cmd', label: 'Show workspaces', sub: `${workspaces.length} saved`, ico: ICON.stack, run: () => setView({ kind: 'workspaces' }) });
+  c.push(...AIUI.aiCommands(cur));
   c.push({ type: 'cmd', label: cur ? 'Sleep tabs outside this group' : 'Sleep inactive tabs', sub: 'Free memory. Tabs stay open and reload when opened.', ico: ICON.bolt,
     run: () => perform(async () => ({ msg: `Put ${plural(await A.sleepOtherTabs(model, cur?.id), 'tab')} to sleep` })) });
   return c;
@@ -843,6 +850,8 @@ async function start() {
   $('#kbdHint').textContent = `${MOD} K`;
   selfTab = await chrome.tabs.getCurrent();
   workspaces = await listWorkspaces();
+  await AIUI.initAi({ esc, toast, openModal, closeModal, render: () => render(), renderMain: () => renderMain(), tabById, groupById })
+    .catch(e => console.error('AI summaries failed to start', e));
   await refresh();
   // Open on the dashboard, or on the group you were just working in if you
   // left Tab Desk on a group's detail page last time.

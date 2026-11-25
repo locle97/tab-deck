@@ -1,6 +1,6 @@
 # AI tab and group summaries — design spec
 
-Status: Draft for review
+Status: Implemented (v1). See §17 for what changed from the draft.
 Date: 2026-11-25
 Scope: Tab Desk extension (Manifest V3). Docs only; no code in this change.
 
@@ -331,3 +331,13 @@ Each phase is shippable alone; Phase 1 can be behind the `Enable AI summaries` t
 - Built-in AI in extensions: https://developer.chrome.com/docs/extensions/ai
 - Summarizing long content: https://developer.chrome.com/docs/ai/scale-summarization
 - Gemini API: https://ai.google.dev/gemini-api/docs
+
+## 17. As built (v1)
+
+Implemented in `src/lib/ai-core.js`, `src/lib/ai.js` and `src/ai-ui.js`. Differences from the draft above:
+
+- **Custom instructions (new).** Settings has *General instructions* applied to every summary, and each group can have its own instructions (group ⋯ menu, palette, or the pencil on a group summary). Group instructions are keyed by normalized group name, not Chrome's group id, so they survive browser restarts and apply when a workspace with that name is restored; renaming a group moves its instructions. Both are capped at 2,000 characters. They go into the Gemini system instruction (after our own rules, which tell the model to ignore instructions inside page text) and into the on-device Summarizer's `sharedContext`. They are part of the cache key, so editing them gives fresh summaries.
+- **Default model** is `gemini-flash-latest` (Google's rolling alias) so it doesn't go stale; editable in settings.
+- **Workspace summaries, the bulk-selection Summarize, and the sensitive-site exclude list are not in v1.** Incognito tabs are never read.
+- **Page access** is asked through an explanation dialog first ("Allow page access" / "Use titles only"). Declining is remembered; settings can grant or revoke it later.
+- **Group summaries** read the 20 most recent tabs for the cloud and 12 on-device.
