@@ -263,6 +263,52 @@ function getSummarizer(opts, onProgress) {
   return sumPool.get(k).catch(e => { throw gestureError(e); });
 }
 
+/* ---------- prompt log (for debugging) ---------- */
+// Every prompt sent to a model, with its answer, is kept in chrome.storage.local (last LOG_MAX) and
+// printed with console.debug. In Tab Desk's DevTools console: tabDeskAiLog() shows them,
+// tabDeskAiLog.clear() empties the log. There is no UI for it on purpose.
+const LOG_KEY = 'aiPromptLog';
+const LOG_MAX = 30;
+const LOG_TEXT_MAX = 30000;
+let logChain = Promise.resolve();
+const clipLog = t => (typeof t === 'string' && t.length > LOG_TEXT_MAX ? `${t.slice(0, LOG_TEXT_MAX)}\n…[${t.length - LOG_TEXT_MAX} more characters not logged]` : t);
+
+/** Runs one model call and logs what was sent and what came back. entry: { kind, engine, api?, model?, title?, url?, group?, system, user } */
+async function logged(entry, run) {
+  const t0 = Date.now();
+  let output, error;
+  try {
+    output = await run();
+    return output;
+  } catch (e) {
+    error = e?.name === 'AbortError' ? 'Stopped' : (e?.message || String(e));
+    throw e;
+  } finally {
+    const rec = {
+      at: new Date(t0).toISOString(), ms: Date.now() - t0, ...entry,
+      system: clipLog(entry.system || ''), user: clipLog(entry.user || ''),
+      output: typeof output === 'string' ? output : output == null ? '' : JSON.stringify(output),
+      ...(error ? { error } : {}),
+    };
+    try { console.debug(`[Tab Desk AI] ${rec.kind} · ${rec.engine}${rec.model ? ` (${rec.model})` : rec.api ? ` (${rec.api})` : ''}${rec.title || rec.group ? ` · ${rec.title || rec.group}` : ''}`, rec); } catch {}
+    logChain = logChain.then(async () => {
+      const { [LOG_KEY]: list = [] } = await chrome.storage.local.get(LOG_KEY);
+      list.push(rec);
+      await chrome.storage.local.set({ [LOG_KEY]: list.slice(-LOG_MAX) });
+    }).catch(() => {});
+  }
+}
+
+/** The logged prompts, oldest first. */
+export async function promptLog() {
+  await logChain;
+  return (await chrome.storage.local.get(LOG_KEY))[LOG_KEY] || [];
+}
+export async function clearPromptLog() {
+  await logChain;
+  await chrome.storage.local.remove(LOG_KEY);
+}
+
 async function localInsight(page, instructions, { api, signal, onProgress }) {
   const text = page.text ? headTail(page.text, 6000) : '';
   if (api === 'prompt') {
@@ -270,31 +316,39 @@ async function localInsight(page, instructions, { api, signal, onProgress }) {
     const s = await base.clone({ signal });
     try {
       const user = `${tabInstructionBlock(instructions)}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
-      const out = await s.prompt(user, { responseConstraint: INSIGHT_SCHEMA, signal });
+      const out = await logged({ kind: 'tab', engine: 'local', api: 'prompt', title: page.title, url: page.url, system: baseTabPrompt(localOut()), user },
+        () => s.prompt(user, { responseConstraint: INSIGHT_SCHEMA, signal }));
       return parseInsight(out);
     } finally { s.destroy?.(); }
   }
-  const sum = await getSummarizer(sumOptions({ lang: page.lang, sharedContext: localContext('tab', { instructions }) }), onProgress);
-  const out = await sum.summarize(text || `${page.title}\n${page.url}`, { context: `Page title: ${page.title}`, signal });
+  const sharedContext = localContext('tab', { instructions });
+  const sum = await getSummarizer(sumOptions({ lang: page.lang, sharedContext }), onProgress);
+  const input = text || `${page.title}\n${page.url}`;
+  const out = await logged({ kind: 'tab', engine: 'local', api: 'summarizer', title: page.title, url: page.url, system: `${sharedContext}\nContext: Page title: ${page.title}`, user: input },
+    () => sum.summarize(input, { context: `Page title: ${page.title}`, signal }));
   return { summary: oneSentence(out), status: null };
 }
 
 async function localGroupSentence(name, lines, instructions, { api, signal, onProgress, onChunk }) {
   const input = lines.join('\n').slice(0, 6000);
   if (api === 'prompt') {
+    const system = groupPrompt({ name, tabs: [], instructions, lang: localOut() }).system;
     const s = await self.LanguageModel.create({
       ...lmIO(),
-      initialPrompts: [{ role: 'system', content: groupPrompt({ name, tabs: [], instructions, lang: localOut() }).system }],
+      initialPrompts: [{ role: 'system', content: system }],
       monitor(m) { m.addEventListener('downloadprogress', e => onProgress?.(e.total ? e.loaded / e.total : e.loaded)); },
     }).catch(e => { throw gestureError(e); });
     try {
-      const out = await s.prompt(`Tabs in "${name}":\n${input}`, { signal });
+      const user = `Tabs in "${name}":\n${input}`;
+      const out = await logged({ kind: 'group', engine: 'local', api: 'prompt', group: name, system, user }, () => s.prompt(user, { signal }));
       onChunk?.(out);
       return out;
     } finally { s.destroy?.(); }
   }
-  const sum = await getSummarizer(sumOptions({ sharedContext: localContext('group', { groupName: name, instructions }) }), onProgress);
-  const out = await sum.summarize(input, { context: `Group name: ${name}`, signal });
+  const sharedContext = localContext('group', { groupName: name, instructions });
+  const sum = await getSummarizer(sumOptions({ sharedContext }), onProgress);
+  const out = await logged({ kind: 'group', engine: 'local', api: 'summarizer', group: name, system: `${sharedContext}\nContext: Group name: ${name}`, user: input },
+    () => sum.summarize(input, { context: `Group name: ${name}`, signal }));
   onChunk?.(out);
   return out;
 }
@@ -390,7 +444,9 @@ export async function summarizeTab(tab, opts = {}) {
   let r;
   if (engine === 'cloud') {
     const { system, user } = tabPrompt({ ...page, instructions, lang: uiLang() });
-    r = parseInsight(await streamGemini({ key: await getApiKey(), model: st.settings.model, system, user, json: true, signal: opts.signal }));
+    const key = await getApiKey();
+    r = parseInsight(await logged({ kind: 'tab', engine: 'cloud', model: st.settings.model, title: page.title, url: page.url, system, user },
+      () => streamGemini({ key, model: st.settings.model, system, user, json: true, signal: opts.signal })));
   } else {
     r = await localInsight(page, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress });
   }
@@ -439,7 +495,9 @@ export async function summarizeGroup(group, opts = {}) {
   if (engine === 'cloud') {
     onStatus?.('Asking Gemini…');
     const { system, user } = groupPrompt({ name: group.name, tabs: pages, instructions, lang: uiLang() });
-    text = await streamGemini({ key: await getApiKey(), model: st.settings.model, system, user, signal, onChunk });
+    const key = await getApiKey();
+    text = await logged({ kind: 'group', engine: 'cloud', model: st.settings.model, group: group.name, system, user },
+      () => streamGemini({ key, model: st.settings.model, system, user, signal, onChunk }));
   } else {
     onStatus?.('Summarizing on this device…');
     const lines = pages.map(p => `- ${p.title}${p.summary ? `: ${p.summary}` : ''}`);
@@ -467,12 +525,14 @@ export async function draftInstructions({ pattern, tab = null, access = false, s
   let out;
   if (engine === 'cloud') {
     const { system, user } = draftPrompt({ pattern, ...page, lang: uiLang() });
-    out = await streamGemini({ key: await getApiKey(), model: st.settings.model, system, user, signal });
+    const key = await getApiKey();
+    out = await logged({ kind: 'draft', engine: 'cloud', model: st.settings.model, title: page.title, url: page.url, pattern, system, user },
+      () => streamGemini({ key, model: st.settings.model, system, user, signal }));
   } else {
     if (st.localApi !== 'prompt') throw new AiError('Drafting needs Chrome’s Prompt API or a Gemini key.', 'no-engine');
     const { system, user } = draftPrompt({ pattern, ...page, lang: localOut(), max: 5000 });
     const s = await self.LanguageModel.create({ ...lmIO(), initialPrompts: [{ role: 'system', content: system }] }).catch(e => { throw gestureError(e); });
-    try { out = await s.prompt(user, { signal }); } finally { s.destroy?.(); }
+    try { out = await logged({ kind: 'draft', engine: 'local', api: 'prompt', title: page.title, url: page.url, pattern, system, user }, () => s.prompt(user, { signal })); } finally { s.destroy?.(); }
   }
   const text = cleanDraft(out);
   if (!text) throw new AiError('The AI returned an empty draft.', 'empty');

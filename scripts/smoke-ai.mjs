@@ -326,6 +326,25 @@ try {
   await page.keyboard.press('Escape');
   step('palette lists Summarize');
 
+  // Prompt log: every prompt and answer is kept in the extension, readable from the DevTools console.
+  const log = await page.evaluate(() => window.tabDeskAiLog());
+  const kinds = new Set(log.map(e => `${e.kind}/${e.engine}`));
+  for (const k of ['tab/local', 'group/local', 'draft/local', 'group/cloud', 'tab/cloud']) assert.ok(kinds.has(k), `log has ${k}`);
+  const lt = log.find(e => e.kind === 'tab' && e.engine === 'local' && /\/pr\/5/.test(e.url));
+  assert.match(lt.system, /Reply with JSON only, in this order/);
+  assert.match(lt.user, /^Instructions for this page:\nPR rule/);
+  assert.match(lt.output, /"summary"/);
+  const ct = log.findLast(e => e.kind === 'tab' && e.engine === 'cloud');
+  assert.match(ct.system, /Instructions for this page:\nPR rule/);
+  assert.ok(ct.model);
+  assert.ok(log.length <= 30);
+  assert.ok(!JSON.stringify(log).includes('good-key'), 'the API key is never logged');
+  const one = await page.evaluate(n => window.tabDeskAiLog(n), log.indexOf(ct));
+  assert.equal(one.at, ct.at);
+  await page.evaluate(() => window.tabDeskAiLog.clear());
+  assert.equal((await page.evaluate(() => window.tabDeskAiLog())).length, 0);
+  step('every prompt and answer is logged in the extension (tabDeskAiLog() in the console), never the API key');
+
   // Turning AI off hides lines, statuses and buttons.
   await page.click('#settingsBtn');
   await page.uncheck('#aiEnabled');

@@ -39,6 +39,16 @@ let workers = 0;
 
 export async function initAi(c) {
   ctx = c;
+  // Debugging without UI: in Tab Desk's DevTools console, tabDeskAiLog() lists the prompts sent to
+  // the AI and its answers (newest last); tabDeskAiLog(n) prints the full text of entry n.
+  const log = async n => {
+    const list = await AI.promptLog();
+    if (n != null) { const e = list.at(n); if (e) console.log(`--- ${e.kind} · ${e.engine} · ${e.at}\n\n[system]\n${e.system}\n\n[user]\n${e.user}\n\n[output]\n${e.output}${e.error ? `\n\n[error]\n${e.error}` : ''}`); return e; }
+    console.table(list.map((e, i) => ({ n: i, at: e.at, kind: e.kind, engine: e.engine, model: e.model || e.api || '', page: e.title || e.group || '', ms: e.ms, output: (e.error ? `ERROR: ${e.error}` : e.output).slice(0, 120) })));
+    return list;
+  };
+  log.clear = () => AI.clearPromptLog();
+  window.tabDeskAiLog = log;
   await Promise.all([refreshState(), AI.loadInsights()]);
   AI.onSettingsChanged(async () => { await refreshState(); ctx.render(); });
   AI.onInsightsChanged(schedulePaint);
