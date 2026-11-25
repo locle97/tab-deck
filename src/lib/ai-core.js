@@ -172,7 +172,8 @@ export function parseInsight(text) {
     try {
       const j = JSON.parse(m[0]);
       const summary = oneSentence(j.summary || j.sentence || '');
-      if (summary) return { summary, status: normalizeStatus(String(j.status || '').toLowerCase()) };
+      const facts = String(j.facts || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+      if (summary) return { summary, status: normalizeStatus(String(j.status || '').toLowerCase()), ...(facts ? { facts } : {}) };
     } catch {}
   }
   return { summary: oneSentence(raw.replace(/^```\w*|```$/g, '')), status: null };
@@ -256,26 +257,43 @@ export function userInstructionBlock(instructions) {
 
 const STATUS_GUIDE = STATUS_ORDER.map(k => `"${k}" (${STATUSES[k].label}): ${STATUSES[k].hint}`).join('\n');
 
+/** Bump when the tab prompt or schema changes, so saved summaries are redone with the new one. */
+export const PROMPT_VERSION = 3;
+
+// "facts" comes first on purpose: the model writes down the page's own state before it summarizes,
+// then picks the status, so the summary and the status are drawn from the same facts.
 export const INSIGHT_SCHEMA = {
   type: 'object',
   properties: {
+    facts: { type: 'string' },
     summary: { type: 'string' },
     status: { type: 'string', enum: [...STATUS_ORDER, 'unknown'] },
   },
-  required: ['summary', 'status'],
+  required: ['facts', 'summary', 'status'],
 };
 
-/** Prompt for one tab: a one-sentence summary plus a status, as JSON. */
+/** Prompt for one tab: the page's state, a one-sentence summary, and a status that agrees with both, as JSON. */
 export function tabPrompt({ title, url, text, instructions, lang = 'en' }) {
   const system = `You look at one browser tab for someone keeping track of many open tabs. ` +
-    `Reply with JSON only: {"summary": "...", "status": "..."}.\n` +
-    `"summary" is ONE short sentence (at most 25 words) saying what this page is and, if there is a task, where it stands. No preamble, no Markdown.\n` +
-    `"status" is one of:\n${STATUS_GUIDE}\n"unknown": none of these is clear.\n` +
-    `Write the summary in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
+    `Reply with JSON only, in this order: {"facts": "...", "summary": "...", "status": "..."}.\n` +
+    `"facts": the page's own current state in a few words, copied from what the page shows (for example "Merged", "Open · review requested from you", "Draft · 2 checks failing", "Closed", "Order delivered"). ` +
+    `Trust the "Page state:" line and the page's status areas over older comments or the description. Empty if the page has no state.\n` +
+    `"summary": ONE short sentence (at most 25 words) saying what this page is and, if there is a task, where it stands. It must agree with "facts". No preamble, no Markdown.\n` +
+    `"status": one of the values below. It must agree with "facts" and "summary" (a merged or closed pull request is "done"; one waiting on your review or changes is "action"; one waiting on others' review or CI is "waiting").\n${STATUS_GUIDE}\n"unknown": none of these is clear.\n` +
+    `Write "facts" and "summary" in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
     userInstructionBlock(instructions);
   const body = text ? clip(text, 60000) : '(The page text could not be read. Work from the title and URL only.)';
   const user = `Title: ${title}\nURL: ${url}\n<page>\n${body}\n</page>`;
   return { system, user };
+}
+
+/** Keep the start and the end of a long text (state often sits at the end of a page, like a PR's merge box). */
+export function headTail(text, max) {
+  const t = String(text ?? '');
+  if (t.length <= max) return t;
+  const head = Math.ceil(max * 0.65);
+  const tail = max - head - 5;
+  return `${t.slice(0, head)}\n…\n${t.slice(-tail)}`;
 }
 
 export function groupPrompt({ name, tabs, instructions, lang = 'en', budget = 200000 }) {
@@ -310,8 +328,11 @@ export function geminiRequest({ model, system, user, json = false }) {
     generationConfig.responseMimeType = 'application/json';
     generationConfig.responseSchema = {
       type: 'OBJECT',
-      properties: { summary: { type: 'STRING' }, status: { type: 'STRING', enum: [...STATUS_ORDER, 'unknown'] } },
-      required: ['summary', 'status'],
+      properties: { facts: { type: 'STRING' }, summary: { type: 'STRING' }, status: { type: 'STRING', enum: [...STATUS_ORDER, 'unknown'] } },
+      // Gemini orders properties alphabetically unless told otherwise, which would put "status" before
+      // "summary" and let the two drift apart. Facts, then summary, then status.
+      propertyOrdering: ['facts', 'summary', 'status'],
+      required: ['facts', 'summary', 'status'],
     };
   }
   return {
