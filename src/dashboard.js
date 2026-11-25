@@ -754,3 +754,57 @@ async function start() {
   }
 }
 start();
+
+/* ---------- resizable sidebar ---------- */
+{
+  const KEY = 'tabdesk.sidebarWidth';
+  const DEFAULT = 272, MIN = 200, MAX = 560;
+  const app = $('.app');
+  const handle = $('#sideResizer');
+  const clamp = w => Math.round(Math.min(Math.max(w, MIN), Math.min(MAX, window.innerWidth - 360)));
+  let preferred = DEFAULT; // what the person chose; the page may be too narrow to show it all
+  const setWidth = (w, save = false, user = true) => {
+    if (user) preferred = Math.min(Math.max(w, MIN), MAX);
+    const v = clamp(preferred);
+    app.style.setProperty('--side-w', `${v}px`);
+    handle.setAttribute('aria-valuenow', v);
+    if (save) { try { preferred === DEFAULT ? localStorage.removeItem(KEY) : localStorage.setItem(KEY, Math.round(preferred)); } catch {} }
+    return v;
+  };
+  handle.setAttribute('aria-valuemin', MIN);
+  handle.setAttribute('aria-valuemax', MAX);
+  let stored = DEFAULT;
+  try { stored = +localStorage.getItem(KEY) || DEFAULT; } catch {}
+  setWidth(stored);
+
+  handle.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const left = app.getBoundingClientRect().left;
+    handle.classList.add('is-active');
+    document.body.classList.add('is-resizing');
+    const move = ev => setWidth(ev.clientX - left);
+    const up = ev => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      handle.classList.remove('is-active');
+      document.body.classList.remove('is-resizing');
+      setWidth(ev.clientX - left, true);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  });
+  handle.addEventListener('dblclick', () => setWidth(DEFAULT, true));
+  handle.addEventListener('keydown', e => {
+    const cur = clamp(preferred);
+    const step = e.shiftKey ? 64 : 16;
+    const next = { ArrowLeft: cur - step, ArrowRight: cur + step, Home: MIN, End: MAX }[e.key];
+    if (next == null) return;
+    e.preventDefault();
+    setWidth(next, true);
+  });
+  window.addEventListener('resize', () => setWidth(preferred, false, false));
+}
