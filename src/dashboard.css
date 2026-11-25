@@ -194,18 +194,10 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .main { container-type: inline-size; container-name: main; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-/* Header bar: status filter chips left, tools right. About 48px tall. */
+/* Header bar: counts left, tools right. About 48px tall. */
 .dash-bar { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 48px; margin: 0 0 14px; padding: 6px 0; background: var(--bg); border-bottom: 1px solid var(--line); }
-.dash-chips { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.dash-chips { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
 .dash-count { color: var(--muted); font-variant-numeric: tabular-nums; }
-.chip { --s: var(--muted); display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--ink); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
-.chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--s); flex: none; }
-.chip b { font-weight: 650; font-variant-numeric: tabular-nums; color: var(--muted); }
-.chip:hover { border-color: var(--faint); }
-.chip[aria-pressed="true"] { border-color: var(--s); background: color-mix(in srgb, var(--s) 14%, var(--surface)); }
-.chip[aria-pressed="true"]:not([class*="st-"]) { --s: var(--ink); background: var(--ink); color: var(--surface); }
-.chip[aria-pressed="true"]:not([class*="st-"]) b { color: inherit; opacity: .7; }
-.chip[aria-pressed="true"] b { color: var(--ink); }
 .dash-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .dash-tools .btn.sm { height: 30px; }
 .dash-search kbd { margin-left: 4px; }
@@ -286,20 +278,6 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .card-toggle svg { width: 12px; height: 12px; transform: rotate(90deg); transition: transform .12s; }
 .card-toggle.open svg { transform: rotate(-90deg); }
 .card-toggle:hover { background: var(--surface-2); color: var(--ink); }
-
-/* Done groups folded into one row. */
-.done-sec { margin-top: 14px; }
-.done-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--muted); text-align: left; }
-.done-row:hover { background: var(--surface); }
-.done-row > svg { width: 14px; height: 14px; flex: none; transition: transform .12s; }
-.done-row[aria-expanded="true"] > svg { transform: rotate(90deg); }
-.done-names { flex: 1; min-width: 0; display: flex; gap: 12px; overflow: hidden; white-space: nowrap; mask-image: linear-gradient(90deg, #000 85%, transparent); }
-.done-name { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
-.done-name .dot { width: 7px; height: 7px; }
-.done-count { flex: none; font-size: 12px; color: var(--faint); }
-.done-sec .cards { margin-top: 10px; }
-.done-sec .card { opacity: .62; }
-.done-sec .card:hover, .done-sec .card:focus-within { opacity: 1; }
 
 /* Inbox: one slim row of ungrouped tabs. */
 .inbox-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; min-height: 44px; padding: 4px 10px; border: 1px dashed var(--line); border-radius: 10px; }

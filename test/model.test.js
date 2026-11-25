@@ -175,7 +175,7 @@ test('lastUsed is the most recent tab access in a group', () => {
 });
 
 /* ---------- dashboard ordering and grouping ---------- */
-import { sortGroups, sortTabsBy, dashboardSections, countBy, statusSegments } from '../src/lib/model.js';
+import { sortGroups, sortTabsBy, statusSegments } from '../src/lib/model.js';
 
 const dg = (id, st, last) => ({ id, st, tabs: [{ lastAccessed: last }] });
 const dgs = [dg(1, 'done', 30), dg(2, 'action', 10), dg(3, null, 50), dg(4, 'action', 20)];
@@ -193,18 +193,7 @@ test('sortTabsBy is stable', () => {
   assert.deepEqual(sortTabsBy(tabs, t => rank(t.s)).map(t => t.id), [2, 4, 1, 3]);
 });
 
-test('dashboardSections folds Done groups, or filters by one status', () => {
-  const st = g => g.st;
-  const r = dashboardSections(dgs, st);
-  assert.deepEqual(r.main.map(g => g.id), [2, 3, 4]);
-  assert.deepEqual(r.done.map(g => g.id), [1]);
-  assert.deepEqual(dashboardSections(dgs, st, { filter: 'action' }).main.map(g => g.id), [2, 4]);
-  assert.deepEqual(dashboardSections(dgs, st, { filter: 'done' }), { main: [dgs[0]], done: [] });
-  assert.deepEqual(dashboardSections(dgs, st, { foldDone: false }).main.length, 4);
-});
-
-test('countBy and statusSegments', () => {
-  assert.deepEqual(countBy(dgs, g => g.st), { done: 1, action: 2, none: 1 });
+test('statusSegments', () => {
   const tabs = [{ s: 'done' }, { s: null }, { s: 'action' }, { s: 'done' }];
   assert.deepEqual(statusSegments(tabs, t => t.s, ['action', 'working', 'waiting', 'done', 'info']),
     [{ status: 'action', n: 1 }, { status: 'done', n: 2 }, { status: 'none', n: 1 }]);

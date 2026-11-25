@@ -286,13 +286,8 @@ try {
   await page.click('[data-act=sort]');
   await page.click('.menu button:has-text("Most urgent")');
   await page.waitForFunction(() => document.querySelector('.card .card-name')?.textContent.trim() === 'Research');
-  // Status chips filter the cards.
-  await page.click('.chip.st-action');
-  await page.waitForFunction(() => document.querySelectorAll('.card').length === 1);
-  assert.equal(await page.getAttribute('.chip.st-action', 'aria-pressed'), 'true');
-  await page.click('.chip[data-st=""]');
-  await page.waitForFunction(() => document.querySelectorAll('.card').length >= 2);
-  step('dashboard cards show tab summaries, status edges, the group sentence; sort menu and status filter chips work');
+  assert.equal(await page.locator('.chip, .done-row').count(), 0, 'no status filter or Done row');
+  step('dashboard cards show tab summaries, status edges, the group sentence; and the sort menu works');
 
   // Gemini key, consent, and cloud summaries.
   await page.click('#settingsBtn');

@@ -3,10 +3,10 @@
 A Chrome extension page for people who keep many tab groups open. It replaces squinting at the tab strip with:
 
 - **Dashboard.** Every open tab group on one page as a grid of cards, so you can keep track of several projects at once.
-  - **Header bar.** On the left, status chips (*All · Needs you · In progress · Waiting · Done · Reference*, each with its number of groups) filter the cards. On the right: a sort menu (*Most urgent*, *Recently used*, *Tab strip order*), a grid/list toggle, *Summarize all* and *Search* (`Ctrl+K`). Sort and layout are remembered.
+  - **Header bar.** On the left, the number of groups and tabs. On the right: a sort menu (*Most urgent*, *Recently used*, *Tab strip order*), a grid/list toggle, *Summarize all* and *Search* (`Ctrl+K`). Sort and layout are remembered.
   - **Cards.** A header tinted with the group's color holds the name and one status pill (e.g. *Done · 2*). A thin bar under it shows how many tabs have each status. The group's AI summary is one muted line (click it to read it all; refresh and edit show on hover). Each tab row shows its status as a colored left edge (click it to change the status), the title, the site in faint text, and Summarize / Move / Close on hover; sleeping tabs are dimmed. A small footer has the tab count, sites, last use and *2 of 4 done*. *Switch* and *⋯* (which holds *Summarize group and tabs*, Save & close, color, sort, collapse, ungroup and close) show on hover.
   - Cards show their first 3 tabs (6 in list view); *N more tabs* opens the full list. With *Most urgent*, groups that need you come first with a stronger border, and tabs inside a card are ordered by status too.
-  - Finished groups fold into a **Done** row at the bottom; open it to see their cards, dimmed. Ungrouped tabs sit in a slim **Inbox** row under the cards.
+  - Finished groups are dimmed, and *Most urgent* sorts them near the end. Ungrouped tabs sit in a slim **Inbox** row under the cards.
   - Cards sit in 3 columns on a wide screen, 2 on a medium one and 1 on a narrow one. Tab Desk always opens on the dashboard. `Alt+0` shows it from anywhere on the page.
 - **Group sidebar.** Every open tab group with its color and tab count, plus an **Inbox** of ungrouped tabs.
   - Drag a group up or down to reorder it. The real tab groups move in Chrome's tab strip too (across windows as well). With a group focused, `Alt+↑` / `Alt+↓` does the same from the keyboard.
