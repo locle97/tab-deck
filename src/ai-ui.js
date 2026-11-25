@@ -20,6 +20,7 @@ const IC = {
   note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4Z"/><path d="M13.5 6.5l4 4"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r=".6" fill="currentColor"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
 };
 
@@ -581,6 +582,10 @@ needs you when reviewers has {viewer}
 waiting when state is open
 ai otherwise`;
 const presetOptions = () => PRESETS.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+// Help text hidden behind an (i) button: info(label) gives the button, hint(html) the text it shows.
+let hintSeq = 0;
+const info = label => `<button class="ai-info" type="button" data-info aria-expanded="false" aria-controls="aiHint${++hintSeq}" title="About ${esc(label)}" aria-label="About ${esc(label)}">${IC.info}</button>`;
+const hint = (html, extra = '') => `<div class="ai-hint ai-muted ai-small${extra ? ' ' + extra : ''}" id="aiHint${hintSeq}" hidden>${html}</div>`;
 const rowsFor = t => (t ? Math.min(12, Math.max(3, t.split('\n').length + 1)) : 3);
 
 function ruleRow(r = { pattern: '', instructions: '' }) {
@@ -596,8 +601,8 @@ function ruleRow(r = { pattern: '', instructions: '' }) {
       <button class="link ai-small" data-m="rundo" type="button" hidden>Undo</button></div>
     <details class="ai-fields"${hasFields ? ' open' : ''}>
       <summary class="ai-small">Page fields and status rules${hasFields ? '' : ' <span class="ai-muted">(optional)</span>'}</summary>
-      <p class="ai-muted ai-small">Read only these values from the page, and decide the status from them without the AI. The AI then only writes the sentence. Leave empty to send the whole page to the AI.</p>
-      <label class="ai-small ai-muted">Fields</label>
+      <div class="ai-label-row"><label class="ai-small ai-muted">Fields</label>${info('page fields')}</div>
+      ${hint('Read only these values from the page, and decide the status from them without the AI. The AI then only writes the sentence. Leave empty to send the whole page to the AI.')}
       <textarea class="ai-rule-fields mono" rows="${rowsFor(r.fields)}" maxlength="${MAX_INSTRUCTIONS}" spellcheck="false" placeholder="${esc(FIELDS_HINT)}" aria-label="Page fields">${esc(r.fields || '')}</textarea>
       <label class="ai-small ai-muted">Status rules</label>
       <textarea class="ai-rule-status mono" rows="${rowsFor(r.statusRules)}" maxlength="${MAX_INSTRUCTIONS}" spellcheck="false" placeholder="${esc(STATUS_HINT)}" aria-label="Status rules">${esc(r.statusRules || '')}</textarea>
@@ -739,23 +744,24 @@ export async function openAiSettings(opts = {}) {
       </section>
 
       <section class="settings-panel" role="tabpanel" id="setPanel-instructions" aria-labelledby="setTab-instructions" ${tab === 'instructions' ? '' : 'hidden'}>
-      <h3 class="first">How the prompt is built</h3>
-      <p class="ai-muted ai-small">Every tab summary starts with a fixed base prompt that asks for JSON in the order <code>facts</code>, <code>summary</code>, <code>status</code>. After it comes one set of instructions, the most specific one: a matching page rule, else the group’s, else the general instructions below, else the default ones. They replace each other; they don’t add up.</p>
+      <h3 class="first">How the prompt is built ${info('how the prompt is built')}</h3>
+      ${hint(`<p>Every tab summary starts with a fixed base prompt that asks for JSON in the order <code>facts</code>, <code>summary</code>, <code>status</code>. After it comes one set of instructions, the most specific one: a matching page rule, else the group’s, else the general instructions below, else the default ones. They replace each other; they don’t add up.</p>`)}
       <details class="ai-prompt-peek"><summary>Show the base prompt and the default instructions</summary>
         <div class="ai-small ai-muted">Base prompt (always used)</div><pre>${esc(baseTabPrompt('en'))}</pre>
         <div class="ai-small ai-muted">Default instructions (used when nothing else applies)</div><pre>${esc(DEFAULT_TAB_INSTRUCTIONS)}</pre>
       </details>
 
-      <h3>General instructions</h3>
-      <label class="ai-field"><span>Used for tabs with no page rule or group instructions. Leave empty to use the default ones.</span>
-        <textarea id="aiGeneral" rows="${s.general ? Math.min(10, s.general.split('\n').length + 1) : 3}" maxlength="${MAX_INSTRUCTIONS}" placeholder="${esc(INSTRUCTION_TEMPLATE)}">${esc(s.general)}</textarea></label>
+      <h3>General instructions ${info('general instructions')}</h3>
+      ${hint('Used for tabs with no page rule or group instructions. Leave empty to use the default ones.')}
+      <label class="ai-field">
+        <textarea id="aiGeneral" aria-label="General instructions" rows="${s.general ? Math.min(10, s.general.split('\n').length + 1) : 3}" maxlength="${MAX_INSTRUCTIONS}" placeholder="${esc(INSTRUCTION_TEMPLATE)}">${esc(s.general)}</textarea></label>
       ${s.general ? '' : '<div class="ai-rule-actions"><button class="link ai-small" id="aiGeneralDefault" type="button">Start from the default instructions</button></div>'}
 
-      <h3>Sites and pages</h3>
+      <h3>Sites and pages ${info('page rules')}</h3>
       <div class="ai-field" id="aiRulesField">
-        <div class="ai-muted ai-small">A site (<code>github.com</code>) covers all its pages. A page pattern matches the whole address without https:// — <code>*</code> is one part of the path, <code>**</code> is anything — so <code>github.com/*/*</code> is a repo’s home, <code>github.com/*/*/pulls</code> its pull request list and <code>github.com/*/*/pull/*</code> one pull request. Or write a <code>/regular expression/</code>. When several rules match a page, only the most specific one is used (a page pattern beats a whole site), and it replaces the group and general instructions there.</div>
-        <label class="ai-check"><input type="checkbox" id="aiPresets" ${s.presets ? 'checked' : ''}><span>Use built-in page fields for ${PRESETS.map(p => esc(p.name)).join(' and ')} pages</span></label>
-        <p class="ai-muted ai-small ai-indent">Their status comes from what the page shows (state, reviewers, checks, who you are) instead of the AI. A rule of yours with page fields replaces them. Open “Page fields and status rules” on a rule to read specific values from any site.</p>
+        ${hint(`A site (<code>github.com</code>) covers all its pages. A page pattern matches the whole address without https:// — <code>*</code> is one part of the path, <code>**</code> is anything — so <code>github.com/*/*</code> is a repo’s home, <code>github.com/*/*/pulls</code> its pull request list and <code>github.com/*/*/pull/*</code> one pull request. Or write a <code>/regular expression/</code>. When several rules match a page, only the most specific one is used (a page pattern beats a whole site), and it replaces the group and general instructions there.`)}
+        <div class="ai-label-row"><label class="ai-check"><input type="checkbox" id="aiPresets" ${s.presets ? 'checked' : ''}><span>Use built-in page fields for GitHub</span></label>${info('built-in page fields')}</div>
+        ${hint(`Covers ${PRESETS.map(p => esc(p.name)).join(' and ')} pages. Their status comes from what the page shows (state, reviewers, checks, who you are) instead of the AI. A rule of yours with page fields replaces them. Open “Page fields and status rules” on a rule to read specific values from any site.`, 'ai-indent')}
         <div id="aiRules">${rules.map(ruleRow).join('')}</div>
         <button class="btn sm" id="aiAddRule" type="button" ${rules.length >= MAX_RULES ? 'disabled' : ''}>+ Add rule</button>
       </div>
@@ -772,6 +778,15 @@ export async function openAiSettings(opts = {}) {
   box => {
     const $b = sel => box.querySelector(sel);
     box.classList.add('settings-dialog');
+    box.addEventListener('click', e => {
+      const b = e.target.closest('[data-info]');
+      if (!b) return;
+      e.preventDefault();
+      const h = box.querySelector('#' + b.getAttribute('aria-controls'));
+      if (!h) return;
+      h.hidden = !h.hidden;
+      b.setAttribute('aria-expanded', String(!h.hidden));
+    });
     // Sidebar tabs: click, or arrow keys while a tab is focused.
     const tabs = [...box.querySelectorAll('.settings-tab')];
     const show = (name, focusTab = false) => {

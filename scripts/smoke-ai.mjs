@@ -373,6 +373,9 @@ try {
   const fr = page.locator('.ai-rule:last-child');
   await fr.locator('.ai-rule-pat').fill(`localhost:${port}/issue/*`);
   await fr.locator('.ai-fields > summary').click();
+  assert.equal(await fr.locator('.ai-fields .ai-hint').isVisible(), false, 'help text is hidden until (i) is pressed');
+  await fr.locator('.ai-fields .ai-info').click();
+  assert.match(await fr.locator('.ai-fields .ai-hint').textContent(), /decide the status from them without the AI/);
   await fr.locator('.ai-rule-fields').fill('viewer: meta[name="user-login"] @content\nstate: .State\nassignee: label: Assignee\nmissing: .nope');
   await fr.locator('.ai-rule-status').fill('done when state matches /closed|merged/\nneeds you when assignee has {viewer}\nai otherwise');
   await fr.locator('[data-m=ftest]').click();

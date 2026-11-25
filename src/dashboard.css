@@ -573,3 +573,14 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-gline .icon-btn svg { width: 13px; height: 13px; }
 .ai-gline .link { font-size: 12px; padding-top: 3px; }
 .ai-gline-wrap:empty { display: none; }
+
+/* (i) buttons that show a hidden help text */
+.ai-info { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; margin-left: 2px; border: 0; border-radius: 50%; background: none; color: var(--muted); cursor: pointer; vertical-align: -4px; }
+.ai-info svg { width: 15px; height: 15px; }
+.ai-info:hover, .ai-info[aria-expanded="true"] { color: var(--ink); background: var(--surface-2); }
+.ai-info:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.ai-hint { margin: 2px 0 6px; line-height: 1.5; }
+.ai-hint p { margin: 0; }
+.ai-label-row { display: flex; align-items: center; gap: 2px; }
+.ai-label-row .ai-check { margin: 6px 0; }
+.ai-label-row .ai-info { vertical-align: 0; }
