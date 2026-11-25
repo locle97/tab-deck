@@ -213,3 +213,9 @@ test('geminiRequest asks for JSON with a status enum when json is set', () => {
   assert.deepEqual(r.body.generationConfig.responseSchema.properties.status.enum, ['action', 'working', 'waiting', 'done', 'info', 'unknown']);
   assert.equal(geminiRequest({ model: 'm', system: 's', user: 'u' }).body.generationConfig.responseMimeType, undefined);
 });
+
+test('summary line under each tab is off by default', () => {
+  assert.equal(normalizeSettings({}).tabLines, false);
+  assert.equal(normalizeSettings({ tabLines: 'yes' }).tabLines, false);
+  assert.equal(normalizeSettings({ tabLines: true }).tabLines, true);
+});

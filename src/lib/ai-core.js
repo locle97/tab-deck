@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
   engine: 'auto',          // 'auto' | 'local' | 'cloud'
   auto: 'local',           // summarize tabs automatically: 'off' | 'local' (on-device only) | 'all'
+  tabLines: false,         // show each tab's summary as a line under its title (otherwise only in the status tooltip)
   model: DEFAULT_MODEL,
   general: '',             // instructions for every summary
   groups: {},              // { [normalized group name]: instructions }
@@ -23,6 +24,7 @@ export function normalizeSettings(s) {
   if (!['auto', 'local', 'cloud'].includes(out.engine)) out.engine = 'auto';
   if (!['off', 'local', 'all'].includes(out.auto)) out.auto = 'local';
   delete out.length;
+  out.tabLines = out.tabLines === true;
   if (typeof out.model !== 'string' || !out.model.trim()) out.model = DEFAULT_MODEL;
   out.model = out.model.trim();
   out.general = clip(String(out.general || ''), MAX_INSTRUCTIONS);

@@ -77,7 +77,7 @@ export const tabSumRow = () => '';
 
 /** The one-sentence summary under a tab's title. */
 export function tabLine(t) {
-  if (!aiEnabled()) return '';
+  if (!aiEnabled() || !state.settings.tabLines) return '';
   return `<span class="ai-line" data-ai-tab="${t.id}">${tabLineInner(t)}</span>`;
 }
 function tabLineInner(t) {
@@ -101,7 +101,12 @@ function tabStatusInner(t, compact) {
   const ins = AI.tabInsight(urlOf(t));
   const s = effectiveStatus(ins);
   const label = s ? STATUSES[s].label : 'No status';
-  const why = s ? `${label}${ins?.manual ? ' (set by you)' : ' (from AI)'}. Click to change.` : 'No status yet. Click to set one.';
+  if (!state.settings.tabLines && busy.has(t.id)) {
+    return compact ? '<span class="ai-spin" title="Summarizing…" aria-label="Summarizing"></span>' : '<span class="ai-st st-none static"><span class="ai-spin" aria-hidden="true"></span>Summarizing…</span>';
+  }
+  if (!state.settings.tabLines && tabErrors.has(t.id) && !compact) return `<button class="ai-st st-none ai-bad" data-act="ai-status" type="button" title="${esc(tabErrors.get(t.id))}">Couldn’t summarize</button>`;
+  const sum = !state.settings.tabLines && ins?.summary ? `${ins.summary}\n\n` : '';
+  const why = sum + (s ? `${label}${ins?.manual ? ' (set by you)' : ' (from AI)'}. Click to change.` : 'No status yet. Click to set one.');
   if (compact) return `<button class="ai-dot-btn st-${s || 'none'}" data-act="ai-status" type="button" title="${esc(why)}" aria-label="Status: ${esc(label)}"><i></i></button>`;
   if (!s) return `<button class="ai-st st-none" data-act="ai-status" type="button" title="${esc(why)}">Set status</button>`;
   return `<button class="ai-st st-${s}${ins?.manual ? ' manual' : ''}" data-act="ai-status" type="button" title="${esc(why)}"><i></i>${esc(label)}</button>`;
@@ -368,7 +373,7 @@ function schedulePaint() {
   if (paintTimer) return;
   paintTimer = setTimeout(() => {
     paintTimer = null;
-    document.querySelectorAll('[data-ai-tab]').forEach(el => paintTab(+el.dataset.aiTab));
+    new Set([...document.querySelectorAll('[data-ai-tab], [data-ai-st]')].map(el => +(el.dataset.aiTab || el.dataset.aiSt))).forEach(paintTab);
     document.querySelectorAll('[data-ai-gst]').forEach(el => { const g = ctx.groupById(+el.dataset.aiGst); if (g) el.innerHTML = groupStatusInner(g); });
     document.querySelectorAll('[data-sum^="group:"]').forEach(el => paintGroup(+el.dataset.sum.split(':')[1]));
   }, 60);
@@ -537,6 +542,8 @@ export async function openAiSettings(opts = {}) {
       <h3 class="first">AI summaries</h3>
       <p class="ai-muted ai-small">One sentence and a status for every tab. Runs on your device by default; add your own Gemini API key for the cloud.</p>
       <label class="ai-check"><input type="checkbox" id="aiEnabled" ${s.enabled ? 'checked' : ''}><span>Show AI summaries and statuses</span></label>
+      <label class="ai-check"><input type="checkbox" id="aiTabLines" ${s.tabLines ? 'checked' : ''}><span>Show the summary under each tab</span></label>
+      <p class="ai-muted ai-small ai-indent">When off, hover a tab’s status to read its summary.</p>
 
       <h3>Engine</h3>
       ${radio('aiEngine', 'auto', s.engine, 'Auto', 'On-device for tabs when ready. Gemini for groups when you’ve added a key.')}
@@ -688,6 +695,7 @@ export async function openAiSettings(opts = {}) {
       if (!newKey && key) chrome.permissions.remove({ origins: GEMINI_ORIGINS }).catch(() => {});
       await AI.saveSettings({
         enabled: $b('#aiEnabled').checked,
+        tabLines: $b('#aiTabLines').checked,
         engine: box.querySelector('input[name=aiEngine]:checked')?.value || 'auto',
         auto: box.querySelector('input[name=aiAuto]:checked')?.value || 'local',
         model: $b('#aiModel').value.trim() || DEFAULT_MODEL,
