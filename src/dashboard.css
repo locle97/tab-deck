@@ -190,7 +190,12 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 /* Dashboard: one card per open group, group color on the left edge. */
 .pane.wide { max-width: 1680px; }
 .grid-ico { width: 14px; height: 14px; flex: none; color: var(--muted); margin: 0 -2px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 14px; align-items: start; }
+.main { container-type: inline-size; container-name: main; }
+/* Dashboard columns follow the width of the main area (not the window, since the sidebar can be resized):
+   large 3 columns, medium 2, small 1. */
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+@container main (max-width: 1000px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container main (max-width: 640px) { .cards { grid-template-columns: minmax(0, 1fr); } }
 .card { position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 12px 10px 10px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
 .card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--c); }
 .card.inbox { border-style: dashed; }

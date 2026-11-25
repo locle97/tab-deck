@@ -24,12 +24,6 @@ let dragging = null; // id of the group being dragged in the sidebar
 const showAllTabs = new Set(); // dashboard cards opened up to list every tab
 const CARD_TABS = 8; // tabs listed on a dashboard card before "+ N more"
 
-// Which page Tab Desk opens on: the dashboard, or the group you last worked in.
-const HOME_KEY = 'tabdesk.home';
-function rememberHome(v) {
-  const home = v.kind === 'dashboard' ? 'dashboard' : v.kind === 'group' ? 'group' : null;
-  if (home) try { localStorage.setItem(HOME_KEY, home); } catch {}
-}
 
 // Sidebar groups opened to show their tabs. Remembered per browser; it is only a convenience.
 const EXPANDED_KEY = 'tabdesk.expandedGroups';
@@ -106,7 +100,7 @@ async function perform(fn) {
 }
 
 /* ---------- actions wired to UI ---------- */
-function setView(v) { view = v; rememberHome(v); selected.clear(); renaming = false; closeMenu(); render(); $('#main').scrollTop = 0; }
+function setView(v) { view = v; selected.clear(); renaming = false; closeMenu(); render(); $('#main').scrollTop = 0; }
 
 const doCloseTabs = ids => perform(async () => ({ msg: `Closed ${plural(ids.length, 'tab')}`, undo: await A.closeTabs(ids) }));
 
@@ -867,13 +861,9 @@ async function start() {
   await AIUI.initAi({ esc, toast, openModal, closeModal, render: () => render(), renderMain: () => renderMain(), tabById, groupById, openMenu, menuItem, menuLabel, allTabs: () => allTabs(model) })
     .catch(e => console.error('AI summaries failed to start', e));
   await refresh();
-  // Open on the dashboard, or on the group you were just working in if you
-  // left Tab Desk on a group's detail page last time.
-  let home = 'dashboard';
-  try { home = localStorage.getItem(HOME_KEY) || home; } catch {}
-  const recent = allTabs(model).filter(x => x.owner).sort((a, b) => (b.t.lastAccessed || 0) - (a.t.lastAccessed || 0))[0];
-  if (home === 'group' && recent) setView({ kind: 'group', id: recent.owner.id });
-  else setView({ kind: 'dashboard' });
+  // Tab Desk always opens on the dashboard.
+  try { localStorage.removeItem('tabdesk.home'); } catch {}
+  setView({ kind: 'dashboard' });
   if (location.hash === '#palette') {
     history.replaceState(null, '', location.pathname);
     openPalette();
