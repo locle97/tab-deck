@@ -126,8 +126,9 @@ const errors = [];
     await page.waitForSelector('#modal:not([hidden]) :text("read the pages you summarize")');
     step('first Summarize explains page access before Chrome asks');
     await page.click('[data-m=titles]');
-    await waitLine(page, '/alpha', /Local summary no page text\.$/);
-    step('“Use titles only” still gives a one-sentence summary under the tab');
+    await page.waitForFunction(() => /Local summary no page text\.\n/.test([...document.querySelectorAll('.tab')].find(r => r.textContent.includes('/alpha'))?.querySelector('.ai-st')?.title || ''));
+    assert.equal(await page.locator('.ai-line').count(), 0, 'no summary line under tabs by default');
+    step('“Use titles only” still gives a one-sentence summary; by default it shows on hover over the status, not under the tab');
   } finally { await ctx.close(); }
 }
 
@@ -147,6 +148,8 @@ try {
   // Settings: general instructions and a URL rule.
   await page.click('#settingsBtn');
   await page.waitForSelector('.settings-dialog [role=tab][data-tab=general][aria-selected=true]');
+  assert.equal(await page.isChecked('#aiTabLines'), false);
+  await page.check('#aiTabLines');
   assert.equal(await page.textContent('#settingsBtn'), 'Settings');
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'settings-general.png') });
   assert.equal(await page.isVisible('#aiGeneral'), false);
@@ -168,8 +171,9 @@ try {
   await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
   let saved = (await page.evaluate(() => chrome.storage.local.get('aiSettings'))).aiSettings;
   assert.equal(saved.general, 'Write in Vietnamese.');
+  assert.equal(saved.tabLines, true);
   assert.deepEqual(saved.rules, [{ pattern: `localhost:${port}/pr/*`, instructions: 'PR rule: say if my review is needed.' }]);
-  step('save general instructions and a URL rule (live match count, invalid pattern flagged)');
+  step('turn on the summary under each tab; save general instructions and a URL rule (live match count, invalid pattern flagged)');
 
   await page.click('[data-act=group-more]');
   await page.click('.menu button:has-text("AI instructions")');
