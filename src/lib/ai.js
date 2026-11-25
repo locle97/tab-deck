@@ -108,6 +108,10 @@ function extractInPage() {
     });
     clone.querySelectorAll('svg, img, [role=img]').forEach(el => {
       if (el.closest('svg') && el.closest('svg') !== el) return;
+      // An icon on a button that has its own text or label is decoration ("Close pull request",
+      // the check on a "Copy" button), and reading it as state would mislead the AI.
+      const btn = el.parentElement?.closest('button, [role=button], a[role=menuitem], clipboard-copy, summary');
+      if (btn && (btn.getAttribute('aria-label') || btn.textContent.trim())) { el.remove(); return; }
       const t = el.tagName === 'IMG' && !el.getAttribute('alt') ? '' : iconText(el);
       el.replaceWith(document.createTextNode(t));
     });

@@ -22,7 +22,7 @@ const step = msg => console.log('✓', msg);
 const server = createServer((req, res) => {
   res.setHeader('content-type', 'text/html');
   const body = req.url === '/long'
-    ? `<main><h1>Long read</h1><span class="State" title="Status: Merged">Merged</span><article><p>One comment</p></article><div class="reviewers"><svg class="octicon octicon-check-circle-fill color-fg-success" aria-hidden="true"><path d="M0 0"/></svg> reviewer-ann <svg class="octicon octicon-dot-fill fgColor-attention" aria-hidden="true"></svg> ci-build <button aria-label="Re-request review"><svg class="octicon octicon-sync"></svg></button></div>${Array.from({ length: 60 }, (_, i) => `<p>Paragraph ${i} ${'lorem ipsum '.repeat(30)}</p>`).join('')}<form><h3 class="status-heading">Pull request successfully merged and closed</h3></form></main>`
+    ? `<main><h1>Long read</h1><span class="State" title="Status: Merged">Merged</span><article><p>One comment</p></article><div class="reviewers"><svg class="octicon octicon-check-circle-fill color-fg-success" aria-hidden="true"><path d="M0 0"/></svg> reviewer-ann <svg class="octicon octicon-dot-fill fgColor-attention" aria-hidden="true"></svg> ci-build <button aria-label="Re-request review"><svg class="octicon octicon-sync"></svg></button><clipboard-copy aria-label="Copy code"><svg class="octicon octicon-check color-fg-success"></svg></clipboard-copy><button><svg class="octicon octicon-git-pull-request-closed"></svg> Close pull request</button></div>${Array.from({ length: 60 }, (_, i) => `<p>Paragraph ${i} ${'lorem ipsum '.repeat(30)}</p>`).join('')}<form><h3 class="status-heading">Pull request successfully merged and closed</h3></form></main>`
     : `<nav>Site menu</nav><main><h1>${req.url}</h1><p>The secret phrase on ${req.url} is purple-otter.</p></main><footer>Footer</footer>`;
   res.end(`<!doctype html><html lang="en"><title>Page ${req.url}</title>${body}`);
 }).listen(0);
@@ -211,6 +211,8 @@ try {
   assert.match(longCall.text, /\[icon: passed\/approved, green\] reviewer-ann/, 'icons become text');
   assert.match(longCall.text, /\[icon: pending, yellow\] ci-build/);
   assert.match(longCall.text, /\[Re-request review\]/);
+  assert.doesNotMatch(longCall.text, /\[icon: passed\/approved, green\] *\[Copy code\]|closed pull request/, 'icons on labelled buttons are left out');
+  assert.equal((longCall.text.match(/passed\/approved/g) || []).length, 1);
   assert.match(calls.find(c => !c.json).system, /ONE short sentence/);
   step('Summarize group: one sentence per tab and for the group, statuses from the AI, URL rule only on matching pages');
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-group-page.png') });
