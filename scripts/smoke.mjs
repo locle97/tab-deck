@@ -173,6 +173,26 @@ try {
     step('group Inbox by site');
   }
 
+  // Resize the sidebar by dragging its edge; the width is remembered.
+  const sideW = () => page.$eval('.side', n => Math.round(n.getBoundingClientRect().width));
+  assert.equal(await sideW(), 272);
+  const h = await page.locator('#sideResizer').boundingBox();
+  await page.mouse.move(h.x + h.width / 2, h.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(h.x + h.width / 2 + 100, h.y + 200, { steps: 5 });
+  await page.mouse.up();
+  assert.ok(Math.abs(await sideW() - 372) <= 2, `sidebar is ${await sideW()}px`);
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'sidebar-wide.png') });
+  await page.reload();
+  await page.waitForSelector('[data-nav=group]');
+  assert.ok(Math.abs(await sideW() - 372) <= 2);
+  await page.focus('#sideResizer');
+  await page.keyboard.press('Home');
+  assert.equal(await sideW(), 200);
+  await page.dblclick('#sideResizer');
+  assert.equal(await sideW(), 272);
+  step('resize the sidebar by dragging, keyboard and double-click reset');
+
   assert.deepEqual(errors, []);
   step('no page errors');
   console.log('\nSmoke test passed.');
