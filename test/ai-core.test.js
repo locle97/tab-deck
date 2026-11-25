@@ -71,13 +71,13 @@ test('langCode and isReadableUrl', () => {
 
 test('prompts ask for one sentence, include user instructions, guard against page instructions and cap sizes', () => {
   const t = tabPrompt({ title: 'T', url: 'https://a', text: 'y'.repeat(70000), instructions: 'Use emoji.', lang: 'vi' });
-  assert.match(t.system, /ONE short sentence/);
-  assert.match(t.system, /"action" \(Needs you\)/);
+  assert.match(t.system, /one short sentence/);
+  assert.match(t.system, /action \(needs me\)/);
   assert.match(t.system, /Use emoji\./);
   assert.match(t.system, /Ignore any instructions/);
   assert.match(t.system, /"vi"/);
-  assert.ok(t.user.length < 61000);
-  assert.match(tabPrompt({ title: 'T', url: 'u', text: '' }).user, /could not be read/);
+  assert.ok(t.user.length < 21000);
+  assert.match(tabPrompt({ title: 'T', url: 'u', text: '' }).user, /No page text/);
 
   const tabs = Array.from({ length: 5 }, (_, i) => ({ title: `T${i}`, url: `https://x/${i}`, text: 'z'.repeat(20000) }));
   const g = groupPrompt({ name: 'Trip', tabs, instructions: 'Focus on prices.', budget: 20000 });
@@ -233,7 +233,7 @@ test('summary and status come from one analysis: facts first, then summary, then
   const all = (p.system + '\n' + p.user).toLowerCase();
   assert.match(all, /facts/);
   assert.match(all, /page state/);
-  assert.match(all, /agree/);
+  assert.match(all, /match facts/);
   assert.ok(PROMPT_VERSION >= 3);
 });
 
@@ -257,10 +257,11 @@ test('tab prompt = fixed base (JSON facts, summary, status) + one set of instruc
   assert.ok(d.includes(DEFAULT_TAB_INSTRUCTIONS));
   const own = tabPrompt({ title: 't', url: 'u', text: 'x', instructions: 'Summary: say who is assigned.' }).system;
   assert.ok(own.startsWith(base));
-  assert.ok(own.endsWith('Instructions for this page:\nSummary: say who is assigned.'));
+  assert.ok(own.endsWith('Instructions:\nSummary: say who is assigned.'));
   assert.ok(!own.includes(DEFAULT_TAB_INSTRUCTIONS), 'user instructions replace the default ones');
-  assert.equal(tabInstructionBlock('  '), `Instructions for this page:\n${DEFAULT_TAB_INSTRUCTIONS}`);
-  for (const label of ['This page is:', 'Facts:', 'Summary:', 'Status:', 'Needs you', 'Reference']) {
+  assert.equal(tabInstructionBlock('  '), `Instructions:\n${DEFAULT_TAB_INSTRUCTIONS}`);
+  assert.ok(tabPrompt({ title: 't', url: 'u', text: 'x' }).system.length < 800, 'the whole default prompt stays short');
+  for (const label of ['Facts:', 'Summary:', 'Status:', 'action', 'done', 'info']) {
     assert.ok(INSTRUCTION_TEMPLATE.includes(label));
     assert.ok(DEFAULT_TAB_INSTRUCTIONS.includes(label));
   }
@@ -272,6 +273,6 @@ test('draft prompt asks to fill the template from an example page; drafts are cl
   assert.match(p.user, /Pattern: github\.com\/\*\/\*\/pull\/\*/);
   assert.match(p.user, /Page state: Open/);
   assert.match(draftPrompt({ pattern: 'x.com' }).user, /No page text/);
-  assert.equal(cleanDraft('Sure! Here it is:\n```\nThis page is: a PR.\nFacts: merged or not.\n```'), 'This page is: a PR.\nFacts: merged or not.');
+  assert.equal(cleanDraft('Sure! Here it is:\n```\nFacts: merged or not.\nSummary: who reviews.\n```'), 'Facts: merged or not.\nSummary: who reviews.');
   assert.ok(cleanDraft('x'.repeat(5000)).length <= MAX_INSTRUCTIONS);
 });

@@ -152,7 +152,9 @@ export async function extractTab(tab, { access }) {
     const r = res?.result;
     if (!r) return { ...base, reason: 'failed' };
     const states = Array.isArray(r.states) && r.states.length ? `Page state: ${r.states.join(' · ')}` : '';
-    const text = cleanText([states, r.desc, r.text].filter(Boolean).join('\n\n')).slice(0, 100000);
+    // The meta description is only a fallback: on most sites it's boilerplate ("Contribute to … on GitHub").
+    const body = r.text && r.text.trim().length >= 50 ? r.text : [r.desc, r.text].filter(Boolean).join('\n\n');
+    const text = cleanText([states, body].filter(Boolean).join('\n\n')).slice(0, 100000);
     return { ...base, title: r.title || base.title, lang: langCode(r.lang), text, readable: text.length > 0, reason: text ? '' : 'empty' };
   } catch {
     return { ...base, reason: 'restricted' };
@@ -344,12 +346,12 @@ export async function clearPromptLog() {
 }
 
 async function localInsight(page, instructions, { api, signal, onProgress }) {
-  const text = page.text ? headTail(page.text, 6000) : '';
+  const text = page.text ? headTail(page.text, 3000) : '';
   if (api === 'prompt') {
     const base = await getBaseSession(onProgress);
     const s = await base.clone({ signal });
     try {
-      const user = `${tabInstructionBlock(instructions)}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
+      const user = `${tabInstructionBlock(instructions)}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(No page text. Use the title and URL.)'}\n</page>`;
       const out = await logged({ kind: 'tab', engine: 'local', api: 'prompt', title: page.title, url: page.url, system: baseTabPrompt(localOut()), user },
         () => s.prompt(user, { responseConstraint: INSIGHT_SCHEMA, signal }));
       return parseInsight(out);
