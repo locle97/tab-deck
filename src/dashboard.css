@@ -472,3 +472,10 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 }
 #aiAddRule { justify-self: start; }
 .settings-tab span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ai-rule-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.ai-rule-actions .btn svg { width: 13px; height: 13px; }
+.ai-rule-actions .btn { display: inline-flex; align-items: center; gap: 5px; }
+.ai-rule-msg { color: var(--muted); }
+.ai-prompt-peek { margin: 6px 0 4px; font-size: 13px; }
+.ai-prompt-peek summary { cursor: pointer; color: var(--focus); }
+.ai-prompt-peek pre { white-space: pre-wrap; font-family: var(--font-mono); font-size: 11.5px; line-height: 1.45; background: var(--surface-2, var(--surface)); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 4px 0 10px; max-height: 220px; overflow: auto; }

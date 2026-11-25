@@ -22,7 +22,7 @@ const step = msg => console.log('✓', msg);
 const server = createServer((req, res) => {
   res.setHeader('content-type', 'text/html');
   const body = req.url === '/long'
-    ? `<article><h1>Long read</h1>${Array.from({ length: 60 }, (_, i) => `<p>Paragraph ${i} ${'lorem ipsum '.repeat(30)}</p>`).join('')}</article>`
+    ? `<main><h1>Long read</h1><span class="State" title="Status: Merged">Merged</span><article><p>One comment</p></article><div class="reviewers"><svg class="octicon octicon-check-circle-fill color-fg-success" aria-hidden="true"><path d="M0 0"/></svg> reviewer-ann <svg class="octicon octicon-dot-fill fgColor-attention" aria-hidden="true"></svg> ci-build <button aria-label="Re-request review"><svg class="octicon octicon-sync"></svg></button><clipboard-copy aria-label="Copy code"><svg class="octicon octicon-check color-fg-success"></svg></clipboard-copy><button><svg class="octicon octicon-git-pull-request-closed"></svg> Close pull request</button></div>${Array.from({ length: 60 }, (_, i) => `<p>Paragraph ${i} ${'lorem ipsum '.repeat(30)}</p>`).join('')}<form><h3 class="status-heading">Pull request successfully merged and closed</h3></form></main>`
     : `<nav>Site menu</nav><main><h1>${req.url}</h1><p>The secret phrase on ${req.url} is purple-otter.</p></main><footer>Footer</footer>`;
   res.end(`<!doctype html><html lang="en"><title>Page ${req.url}</title>${body}`);
 }).listen(0);
@@ -47,6 +47,9 @@ function fakes() {
     async clone() { return new FakeLM(this.o); }
     async prompt(text, opts = {}) {
       ai.calls.push({ system: this.o.initialPrompts?.[0]?.content || '', text, json: !!opts.responseConstraint });
+      if (/write instructions for an AI that summarizes/.test(this.o.initialPrompts?.[0]?.content || '')) {
+        return 'Here you go:\n```\nThis page is: a test page.\nFacts: the secret phrase.\nSummary: say the secret phrase.\nStatus:\n- Needs you when the phrase is red.\n```';
+      }
       if (opts.responseConstraint) {
         const status = /PR rule/.test(text) ? 'action' : /purple-otter/.test(text) ? 'working' : 'info';
         const what = /purple-otter/.test(text) ? 'mentions purple-otter' : 'no page text';
@@ -194,10 +197,22 @@ try {
   const prCall = calls.find(c => c.json && c.text.includes('/pr/5'));
   const alphaCall = calls.find(c => c.json && c.text.includes('/alpha'));
   const longCall = calls.find(c => c.json && c.text.includes('/long'));
-  assert.match(prCall.text, /Write in Vietnamese\.\nFocus on the secret phrase\.\nPR rule/);
+  assert.match(prCall.text, /^Instructions for this page:\nPR rule/, 'the page rule replaces group and general instructions');
+  assert.doesNotMatch(prCall.text, /Vietnamese|Focus on the secret/);
+  assert.match(alphaCall.text, /^Instructions for this page:\nFocus on the secret phrase\./, 'group instructions replace the general ones');
+  assert.doesNotMatch(alphaCall.text, /Vietnamese/);
+  assert.match(prCall.system || calls.find(c => c.json).system, /Reply with JSON only, in this order: \{"facts"/);
   assert.doesNotMatch(alphaCall.text, /PR rule/);
   assert.doesNotMatch(alphaCall.text, /Site menu|Footer/);
   assert.ok(longCall.text.length < 7000, 'long pages are trimmed for the on-device model');
+  assert.match(longCall.text, /Page state: Status: Merged/, 'state badges are read and put first');
+  assert.match(longCall.text, /successfully merged and closed/, 'the end of a long page (merge box) is kept');
+  assert.match(longCall.text, /Paragraph 3 /, 'the whole main area is read, not just one comment');
+  assert.match(longCall.text, /\[icon: passed\/approved, green\] reviewer-ann/, 'icons become text');
+  assert.match(longCall.text, /\[icon: pending, yellow\] ci-build/);
+  assert.match(longCall.text, /\[Re-request review\]/);
+  assert.doesNotMatch(longCall.text, /\[icon: passed\/approved, green\] *\[Copy code\]|closed pull request/, 'icons on labelled buttons are left out');
+  assert.equal((longCall.text.match(/passed\/approved/g) || []).length, 1);
   assert.match(calls.find(c => !c.json).system, /ONE short sentence/);
   step('Summarize group: one sentence per tab and for the group, statuses from the AI, URL rule only on matching pages');
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-group-page.png') });
@@ -215,8 +230,23 @@ try {
   await page.click('.tab:has-text("/long") .ai-st');
   await page.click('.menu button:has-text("pages like this")');
   await page.waitForFunction(p => [...document.querySelectorAll('.ai-rule-pat')].some(i => i.value === p), `localhost:${port}/long`);
+  // Draft with AI fills the template from the matching tab; Undo is not offered for an empty box.
+  const rule = page.locator('.ai-rule:last-child');
+  await rule.locator('[data-m=rdraft]').click();
+  await page.waitForFunction(() => /^This page is: a test page\./.test(document.querySelector('.ai-rule:last-child .ai-rule-ins').value));
+  const draftCall = await page.evaluate(() => window.__ai.calls.filter(c => /write instructions for an AI/.test(c.system)).at(-1));
+  assert.match(draftCall.system, /This page is: …\nFacts: …/, 'the template is in the draft prompt');
+  assert.match(draftCall.text, /Pattern: localhost:\d+\/long/);
+  assert.match(draftCall.text, /Paragraph 3 /, 'the matching tab’s page text is used');
+  assert.match(await rule.locator('.ai-rule-msg').textContent(), /Drafted by AI/);
+  await rule.locator('.ai-rule-ins').fill('My own words');
+  await rule.locator('[data-m=rtpl]').click();
+  assert.match(await rule.locator('.ai-rule-ins').inputValue(), /^This page is: …/);
+  await rule.locator('[data-m=rundo]').click();
+  assert.equal(await rule.locator('.ai-rule-ins').inputValue(), 'My own words');
+  if (SHOTS) { await rule.scrollIntoViewIfNeeded(); await page.screenshot({ path: join(SHOTS, 'ai-rule-draft.png') }); }
   await page.click('[data-m=cancel]');
-  step('status menu offers instructions for pages like this one, with a suggested pattern');
+  step('status menu offers instructions for pages like this one; Draft with AI fills the template from that page; Insert template and Undo');
 
   // Automatic summaries: the model is ready now, so a new tab gets summarized on its own.
   const p2 = await ctx.newPage();
@@ -268,7 +298,8 @@ try {
   let f = await page.evaluate(() => window.__ai.fetches.at(-1));
   assert.equal(f.headers['x-goog-api-key'], 'good-key');
   assert.doesNotMatch(f.url, /good-key/);
-  assert.match(f.body.systemInstruction.parts[0].text, /Write in Vietnamese\.\nFocus on the secret phrase\./);
+  assert.match(f.body.systemInstruction.parts[0].text, /Focus on the secret phrase\./);
+  assert.doesNotMatch(f.body.systemInstruction.parts[0].text, /Vietnamese/);
   step('with a key, the group sentence comes from Gemini after consent, with instructions, key in a header');
 
   // Gemini for tabs: JSON summary + status.
@@ -283,7 +314,7 @@ try {
   assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Waiting/);
   f = await page.evaluate(() => window.__ai.fetches.at(-1));
   assert.equal(f.body.generationConfig.responseMimeType, 'application/json');
-  assert.match(f.body.systemInstruction.parts[0].text, /PR rule/);
+  assert.match(f.body.systemInstruction.parts[0].text, /^You look at one browser tab[\s\S]*in this order: \{"facts"[\s\S]*Instructions for this page:\nPR rule/);
   step('Gemini for tabs returns one sentence and a status as JSON, with the URL rule');
 
   // Rename keeps the group's instructions.
@@ -299,6 +330,25 @@ try {
   await page.waitForSelector('.pal-item:has-text("Summarize")');
   await page.keyboard.press('Escape');
   step('palette lists Summarize');
+
+  // Prompt log: every prompt and answer is kept in the extension, readable from the DevTools console.
+  const log = await page.evaluate(() => window.tabDeskAiLog());
+  const kinds = new Set(log.map(e => `${e.kind}/${e.engine}`));
+  for (const k of ['tab/local', 'group/local', 'draft/local', 'group/cloud', 'tab/cloud']) assert.ok(kinds.has(k), `log has ${k}`);
+  const lt = log.find(e => e.kind === 'tab' && e.engine === 'local' && /\/pr\/5/.test(e.url));
+  assert.match(lt.system, /Reply with JSON only, in this order/);
+  assert.match(lt.user, /^Instructions for this page:\nPR rule/);
+  assert.match(lt.output, /"summary"/);
+  const ct = log.findLast(e => e.kind === 'tab' && e.engine === 'cloud');
+  assert.match(ct.system, /Instructions for this page:\nPR rule/);
+  assert.ok(ct.model);
+  assert.ok(log.length <= 30);
+  assert.ok(!JSON.stringify(log).includes('good-key'), 'the API key is never logged');
+  const one = await page.evaluate(n => window.tabDeskAiLog(n), log.indexOf(ct));
+  assert.equal(one.at, ct.at);
+  await page.evaluate(() => window.tabDeskAiLog.clear());
+  assert.equal((await page.evaluate(() => window.tabDeskAiLog())).length, 0);
+  step('every prompt and answer is logged in the extension (tabDeskAiLog() in the console), never the API key');
 
   // Turning AI off hides lines, statuses and buttons.
   await page.click('#settingsBtn');

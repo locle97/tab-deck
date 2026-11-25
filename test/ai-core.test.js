@@ -4,7 +4,8 @@ import {
   normalizeSettings, groupKey, instructionsFor, chooseEngine, cleanText, chunkText, langCode, isReadableUrl,
   tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, cacheKey, pruneCache, renderSummary,
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
-  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, needsInsight,
+  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, needsInsight, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
+  pickInstructions, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
 } from '../src/lib/ai-core.js';
 
 test('normalizeSettings fills defaults and drops bad values', () => {
@@ -23,7 +24,7 @@ test('normalizeSettings fills defaults and drops bad values', () => {
 test('group instructions are keyed by normalized name and combined with general ones', () => {
   assert.equal(groupKey('  Trip   to JAPAN '), 'trip to japan');
   const s = normalizeSettings({ general: 'Write in Vietnamese.', groups: { 'Trip to Japan': 'Focus on prices.' } });
-  assert.equal(instructionsFor(s, 'trip to japan'), 'Write in Vietnamese.\nFocus on prices.');
+  assert.equal(instructionsFor(s, 'trip to japan'), 'Focus on prices.');
   assert.equal(instructionsFor(s, 'Other'), 'Write in Vietnamese.');
   assert.equal(instructionsFor(s, null), 'Write in Vietnamese.');
   assert.equal(instructionsFor(normalizeSettings({}), 'x'), '');
@@ -140,17 +141,21 @@ test('renderSummary renders bullets and bold but never raw HTML', () => {
   assert.equal(renderSummary('## Head'), '<p><b>Head</b></p>');
 });
 
-test('instructionsFor adds every matching URL rule in order', () => {
+test('instructionsFor uses one set: the most specific page rule, else group, else general', () => {
   const s = normalizeSettings({ general: 'G', groups: { work: 'W' }, rules: [
     { pattern: 'github.com', instructions: 'site' },
     { pattern: 'github.com/*/*', instructions: 'repo home' },
     { pattern: 'github.com/*/*/pulls', instructions: 'pr list' },
     { pattern: 'github.com/*/*/pull/*', instructions: 'one pr' },
   ] });
-  assert.equal(instructionsFor(s, 'Work', 'https://github.com/locle97/tab-deck'), 'G\nW\nsite\nrepo home');
-  assert.equal(instructionsFor(s, null, 'https://github.com/locle97/tab-deck/pulls'), 'G\nsite\npr list');
-  assert.equal(instructionsFor(s, null, 'https://github.com/locle97/tab-deck/pull/5'), 'G\nsite\none pr');
+  assert.equal(instructionsFor(s, 'Work', 'https://github.com/locle97/tab-deck'), 'repo home');
+  assert.equal(instructionsFor(s, null, 'https://github.com/locle97/tab-deck/pulls'), 'pr list');
+  assert.equal(instructionsFor(s, null, 'https://github.com/locle97/tab-deck/pull/5'), 'one pr');
+  assert.equal(instructionsFor(s, 'Work', 'https://github.com/locle97'), 'site');
+  assert.equal(instructionsFor(s, 'Work', 'https://example.com/'), 'W');
   assert.equal(instructionsFor(s, null, 'https://example.com/'), 'G');
+  assert.deepEqual(pickInstructions(normalizeSettings({}), null, 'https://example.com/'), { text: '', source: 'default' });
+  assert.equal(pickInstructions(s, null, 'https://github.com/a/b/pull/1').source, 'rule');
 });
 
 test('URL patterns: sites, * and **, regex, query, trailing slash and scheme', () => {
@@ -218,4 +223,55 @@ test('summary line under each tab is off by default', () => {
   assert.equal(normalizeSettings({}).tabLines, false);
   assert.equal(normalizeSettings({ tabLines: 'yes' }).tabLines, false);
   assert.equal(normalizeSettings({ tabLines: true }).tabLines, true);
+});
+
+test('summary and status come from one analysis: facts first, then summary, then status', () => {
+  assert.deepEqual(Object.keys(INSIGHT_SCHEMA.properties), ['facts', 'summary', 'status']);
+  const g = geminiRequest({ model: 'm', system: 's', user: 'u', json: true }).body.generationConfig.responseSchema;
+  assert.deepEqual(g.propertyOrdering, ['facts', 'summary', 'status']);
+  const p = tabPrompt({ title: 'Fix login · Pull Request #5', url: 'https://github.com/a/b/pull/5', text: 'Page state: Merged\n\nbody' });
+  const all = (p.system + '\n' + p.user).toLowerCase();
+  assert.match(all, /facts/);
+  assert.match(all, /page state/);
+  assert.match(all, /agree/);
+  assert.ok(PROMPT_VERSION >= 3);
+});
+
+test('parseInsight keeps short facts; headTail keeps both ends of long pages', () => {
+  const r = parseInsight('{"facts":"PR merged by bob","summary":"The login fix PR was merged.","status":"done"}');
+  assert.deepEqual(r, { facts: 'PR merged by bob', summary: 'The login fix PR was merged.', status: 'done' });
+  assert.ok(parseInsight(JSON.stringify({ facts: 'x'.repeat(500), summary: 'A page about things.', status: 'info' })).facts.length <= 160);
+  const long = 'HEAD' + 'a'.repeat(20000) + 'TAIL';
+  const ht = headTail(long, 6000);
+  assert.ok(ht.length <= 6010);
+  assert.ok(ht.startsWith('HEAD'));
+  assert.ok(ht.endsWith('TAIL'));
+  assert.equal(headTail('short', 6000), 'short');
+});
+
+test('tab prompt = fixed base (JSON facts, summary, status) + one set of instructions, default when none', () => {
+  const base = baseTabPrompt('en');
+  assert.match(base, /Reply with JSON only, in this order: \{"facts": "\.\.\.", "summary": "\.\.\.", "status": "\.\.\."\}/);
+  const d = tabPrompt({ title: 't', url: 'u', text: 'x' }).system;
+  assert.ok(d.startsWith(base));
+  assert.ok(d.includes(DEFAULT_TAB_INSTRUCTIONS));
+  const own = tabPrompt({ title: 't', url: 'u', text: 'x', instructions: 'Summary: say who is assigned.' }).system;
+  assert.ok(own.startsWith(base));
+  assert.ok(own.endsWith('Instructions for this page:\nSummary: say who is assigned.'));
+  assert.ok(!own.includes(DEFAULT_TAB_INSTRUCTIONS), 'user instructions replace the default ones');
+  assert.equal(tabInstructionBlock('  '), `Instructions for this page:\n${DEFAULT_TAB_INSTRUCTIONS}`);
+  for (const label of ['This page is:', 'Facts:', 'Summary:', 'Status:', 'Needs you', 'Reference']) {
+    assert.ok(INSTRUCTION_TEMPLATE.includes(label));
+    assert.ok(DEFAULT_TAB_INSTRUCTIONS.includes(label));
+  }
+});
+
+test('draft prompt asks to fill the template from an example page; drafts are cleaned', () => {
+  const p = draftPrompt({ pattern: 'github.com/*/*/pull/*', title: 'Fix login #5', url: 'https://github.com/a/b/pull/5', text: 'Page state: Open' });
+  assert.ok(p.system.includes(INSTRUCTION_TEMPLATE));
+  assert.match(p.user, /Pattern: github\.com\/\*\/\*\/pull\/\*/);
+  assert.match(p.user, /Page state: Open/);
+  assert.match(draftPrompt({ pattern: 'x.com' }).user, /No page text/);
+  assert.equal(cleanDraft('Sure! Here it is:\n```\nThis page is: a PR.\nFacts: merged or not.\n```'), 'This page is: a PR.\nFacts: merged or not.');
+  assert.ok(cleanDraft('x'.repeat(5000)).length <= MAX_INSTRUCTIONS);
 });

@@ -5,9 +5,10 @@
 
 import {
   DEFAULT_SETTINGS, normalizeSettings, instructionsFor, chooseEngine, cleanText, langCode,
-  isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, userInstructionBlock,
+  isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
+  baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   cacheKey, fnv, pruneCache, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
-  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX,
+  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
 } from './ai-core.js';
 
 const SETTINGS_KEY = 'aiSettings';
@@ -56,7 +57,7 @@ export function onSettingsChanged(cb) {
   });
 }
 
-export { DEFAULT_SETTINGS, instructionsFor };
+export { DEFAULT_SETTINGS, instructionsFor, pickInstructions, baseTabPrompt, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS };
 
 /* ---------- page access ---------- */
 
@@ -74,18 +75,66 @@ export const revokePageAccess = () => chrome.permissions.remove({ origins: PAGE_
 
 // Runs inside the page. Must be self-contained.
 function extractInPage() {
-  const pick = document.querySelector('article, main, [role=main]') || document.body;
+  // Prefer the page's main area. (Not the first <article>: on apps like GitHub that can be a single
+  // comment, which hides the pull request's own state.)
+  const pick = document.querySelector('main, [role=main]') || document.querySelector('article') || document.body;
   let text = '';
   if (pick) {
     const clone = pick.cloneNode(true);
-    clone.querySelectorAll('nav, header, footer, aside, script, style, noscript, form, svg, iframe, [aria-hidden=true], [hidden]').forEach(n => n.remove());
+    // Icons carry state that text alone misses (a green check next to a reviewer, a yellow dot on a
+    // running check). Turn each icon into a short text label before anything is removed: its own
+    // label or tooltip if it has one, else what its icon name and color mean.
+    const ICON_MEANING = { 'check': 'passed/approved', 'check-circle': 'passed/approved', 'check-circle-fill': 'passed/approved',
+      'x': 'failed', 'x-circle': 'failed', 'x-circle-fill': 'failed', 'stop': 'failed', 'dot-fill': 'pending', 'dot': 'pending',
+      'clock': 'waiting', 'hourglass': 'waiting', 'sync': 'in progress', 'skip': 'skipped', 'skip-fill': 'skipped',
+      'file-diff': 'changes requested', 'request-changes': 'changes requested', 'eye': 'review requested', 'comment': 'commented',
+      'git-merge': 'merged', 'git-pull-request': 'open pull request', 'git-pull-request-closed': 'closed pull request',
+      'git-pull-request-draft': 'draft pull request', 'issue-opened': 'open issue', 'issue-closed': 'closed issue',
+      'alert': 'warning', 'alert-fill': 'warning', 'blocked': 'blocked', 'circle-slash': 'blocked', 'lock': 'locked' };
+    const COLOR = { success: 'green', danger: 'red', attention: 'yellow', severe: 'orange', done: 'purple', accent: 'blue', open: 'green', closed: 'red' };
+    const iconText = el => {
+      const own = (el.getAttribute('aria-label') || el.querySelector?.('title')?.textContent || el.getAttribute('title') || el.getAttribute('alt') || '').replace(/\s+/g, ' ').trim();
+      const cls = `${el.getAttribute('class') || ''} ${el.parentElement?.getAttribute('class') || ''}`;
+      const name = /octicon-([a-z0-9-]+?)(?:-\d+)?(?=\s|$)/.exec(cls)?.[1] || '';
+      const color = Object.entries(COLOR).find(([k]) => new RegExp(`(color-fg-|fgColor-|text-|-)${k}\\b`).test(cls))?.[1] || '';
+      const spinning = /anim-rotate|spinner|animate-spin/.test(cls);
+      const meaning = own || ICON_MEANING[name] || (spinning ? 'in progress' : '');
+      if (!meaning || meaning.length > 80) return '';
+      return ` [icon: ${meaning}${color && !own ? `, ${color}` : ''}] `;
+    };
+    // Short labels on elements with no visible text (icon buttons, status links).
+    clone.querySelectorAll('[aria-label]:not(svg):not(img)').forEach(el => {
+      if (!el.textContent.trim()) { const v = el.getAttribute('aria-label').trim(); if (v && v.length <= 80) el.append(` [${v}] `); }
+    });
+    clone.querySelectorAll('svg, img, [role=img]').forEach(el => {
+      if (el.closest('svg') && el.closest('svg') !== el) return;
+      // An icon on a button that has its own text or label is decoration ("Close pull request",
+      // the check on a "Copy" button), and reading it as state would mislead the AI.
+      const btn = el.parentElement?.closest('button, [role=button], a[role=menuitem], clipboard-copy, summary');
+      if (btn && (btn.getAttribute('aria-label') || btn.textContent.trim())) { el.remove(); return; }
+      const t = el.tagName === 'IMG' && !el.getAttribute('alt') ? '' : iconText(el);
+      el.replaceWith(document.createTextNode(t));
+    });
+    // Drop page chrome, but keep <form> and in-page <header>: apps put real state in them
+    // (GitHub's merge box and review status, a PR's title and Open/Merged badge).
+    clone.querySelectorAll('nav, footer, aside, script, style, noscript, template, svg, iframe, textarea, select, dialog, [role=navigation], [role=contentinfo], [role=dialog], [role=menu], [popover]:not(tool-tip), [aria-hidden=true], [hidden]').forEach(n => n.remove());
     // innerText needs layout; a detached clone has none, so fall back to textContent with block breaks.
-    clone.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, br, div, section, tr').forEach(n => n.append('\n'));
+    clone.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, br, div, section, tr, header, form').forEach(n => n.append('\n'));
     text = clone.textContent || '';
     if (text.trim().length < 50 && document.body) text = document.body.innerText || text;
   }
+  // Short status signals the page shows on badges and in status areas, e.g. GitHub's
+  // "Status: Merged", "Review required", "All checks have passed". Put first so they're never cut off.
+  const seen = new Set();
+  const states = [];
+  const sel = '[title^="Status:" i], .State, [class*="StateLabel"], [data-testid*="state" i], [data-status], [aria-label^="Status" i], .merge-status-list .status-heading, .mergeability-details .status-heading, .branch-action-item .status-heading, [class*="MergeBox"] h3, [class*="mergeBox"] h3';
+  for (const el of document.querySelectorAll(sel)) {
+    const v = (el.getAttribute('title') || el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (v && v.length <= 120 && !seen.has(v.toLowerCase())) { seen.add(v.toLowerCase()); states.push(v); }
+    if (states.length >= 8) break;
+  }
   const desc = document.querySelector('meta[name=description], meta[property="og:description"]')?.content || '';
-  return { title: document.title, lang: document.documentElement.lang || '', desc, text: text.slice(0, 120000) };
+  return { title: document.title, lang: document.documentElement.lang || '', desc, states, text: text.slice(0, 120000) };
 }
 
 /**
@@ -102,7 +151,8 @@ export async function extractTab(tab, { access }) {
     const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: extractInPage });
     const r = res?.result;
     if (!r) return { ...base, reason: 'failed' };
-    const text = cleanText([r.desc, r.text].filter(Boolean).join('\n\n')).slice(0, 100000);
+    const states = Array.isArray(r.states) && r.states.length ? `Page state: ${r.states.join(' · ')}` : '';
+    const text = cleanText([states, r.desc, r.text].filter(Boolean).join('\n\n')).slice(0, 100000);
     return { ...base, title: r.title || base.title, lang: langCode(r.lang), text, readable: text.length > 0, reason: text ? '' : 'empty' };
   } catch {
     return { ...base, reason: 'restricted' };
@@ -224,7 +274,7 @@ addEventListener('pagehide', dropSessions);
 function getBaseSession(onProgress) {
   touchIdle();
   if (!baseSession) {
-    const { system } = tabPrompt({ title: '', url: '', text: '', instructions: '', lang: localOut() });
+    const system = baseTabPrompt(localOut());
     baseSession = self.LanguageModel.create({
       ...lmIO(),
       initialPrompts: [{ role: 'system', content: system }],
@@ -247,38 +297,92 @@ function getSummarizer(opts, onProgress) {
   return sumPool.get(k).catch(e => { throw gestureError(e); });
 }
 
+/* ---------- prompt log (for debugging) ---------- */
+// Every prompt sent to a model, with its answer, is kept in chrome.storage.local (last LOG_MAX) and
+// printed with console.debug. In Tab Desk's DevTools console: tabDeskAiLog() shows them,
+// tabDeskAiLog.clear() empties the log. There is no UI for it on purpose.
+const LOG_KEY = 'aiPromptLog';
+const LOG_MAX = 30;
+const LOG_TEXT_MAX = 30000;
+let logChain = Promise.resolve();
+const clipLog = t => (typeof t === 'string' && t.length > LOG_TEXT_MAX ? `${t.slice(0, LOG_TEXT_MAX)}\n…[${t.length - LOG_TEXT_MAX} more characters not logged]` : t);
+
+/** Runs one model call and logs what was sent and what came back. entry: { kind, engine, api?, model?, title?, url?, group?, system, user } */
+async function logged(entry, run) {
+  const t0 = Date.now();
+  let output, error;
+  try {
+    output = await run();
+    return output;
+  } catch (e) {
+    error = e?.name === 'AbortError' ? 'Stopped' : (e?.message || String(e));
+    throw e;
+  } finally {
+    const rec = {
+      at: new Date(t0).toISOString(), ms: Date.now() - t0, ...entry,
+      system: clipLog(entry.system || ''), user: clipLog(entry.user || ''),
+      output: typeof output === 'string' ? output : output == null ? '' : JSON.stringify(output),
+      ...(error ? { error } : {}),
+    };
+    try { console.debug(`[Tab Desk AI] ${rec.kind} · ${rec.engine}${rec.model ? ` (${rec.model})` : rec.api ? ` (${rec.api})` : ''}${rec.title || rec.group ? ` · ${rec.title || rec.group}` : ''}`, rec); } catch {}
+    logChain = logChain.then(async () => {
+      const { [LOG_KEY]: list = [] } = await chrome.storage.local.get(LOG_KEY);
+      list.push(rec);
+      await chrome.storage.local.set({ [LOG_KEY]: list.slice(-LOG_MAX) });
+    }).catch(() => {});
+  }
+}
+
+/** The logged prompts, oldest first. */
+export async function promptLog() {
+  await logChain;
+  return (await chrome.storage.local.get(LOG_KEY))[LOG_KEY] || [];
+}
+export async function clearPromptLog() {
+  await logChain;
+  await chrome.storage.local.remove(LOG_KEY);
+}
+
 async function localInsight(page, instructions, { api, signal, onProgress }) {
-  const text = page.text ? page.text.slice(0, 6000) : '';
+  const text = page.text ? headTail(page.text, 6000) : '';
   if (api === 'prompt') {
     const base = await getBaseSession(onProgress);
     const s = await base.clone({ signal });
     try {
-      const user = `${userInstructionBlock(instructions).trim()}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
-      const out = await s.prompt(user, { responseConstraint: INSIGHT_SCHEMA, signal });
+      const user = `${tabInstructionBlock(instructions)}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
+      const out = await logged({ kind: 'tab', engine: 'local', api: 'prompt', title: page.title, url: page.url, system: baseTabPrompt(localOut()), user },
+        () => s.prompt(user, { responseConstraint: INSIGHT_SCHEMA, signal }));
       return parseInsight(out);
     } finally { s.destroy?.(); }
   }
-  const sum = await getSummarizer(sumOptions({ lang: page.lang, sharedContext: localContext('tab', { instructions }) }), onProgress);
-  const out = await sum.summarize(text || `${page.title}\n${page.url}`, { context: `Page title: ${page.title}`, signal });
+  const sharedContext = localContext('tab', { instructions });
+  const sum = await getSummarizer(sumOptions({ lang: page.lang, sharedContext }), onProgress);
+  const input = text || `${page.title}\n${page.url}`;
+  const out = await logged({ kind: 'tab', engine: 'local', api: 'summarizer', title: page.title, url: page.url, system: `${sharedContext}\nContext: Page title: ${page.title}`, user: input },
+    () => sum.summarize(input, { context: `Page title: ${page.title}`, signal }));
   return { summary: oneSentence(out), status: null };
 }
 
 async function localGroupSentence(name, lines, instructions, { api, signal, onProgress, onChunk }) {
   const input = lines.join('\n').slice(0, 6000);
   if (api === 'prompt') {
+    const system = groupPrompt({ name, tabs: [], instructions, lang: localOut() }).system;
     const s = await self.LanguageModel.create({
       ...lmIO(),
-      initialPrompts: [{ role: 'system', content: groupPrompt({ name, tabs: [], instructions, lang: localOut() }).system }],
+      initialPrompts: [{ role: 'system', content: system }],
       monitor(m) { m.addEventListener('downloadprogress', e => onProgress?.(e.total ? e.loaded / e.total : e.loaded)); },
     }).catch(e => { throw gestureError(e); });
     try {
-      const out = await s.prompt(`Tabs in "${name}":\n${input}`, { signal });
+      const user = `Tabs in "${name}":\n${input}`;
+      const out = await logged({ kind: 'group', engine: 'local', api: 'prompt', group: name, system, user }, () => s.prompt(user, { signal }));
       onChunk?.(out);
       return out;
     } finally { s.destroy?.(); }
   }
-  const sum = await getSummarizer(sumOptions({ sharedContext: localContext('group', { groupName: name, instructions }) }), onProgress);
-  const out = await sum.summarize(input, { context: `Group name: ${name}`, signal });
+  const sharedContext = localContext('group', { groupName: name, instructions });
+  const sum = await getSummarizer(sumOptions({ sharedContext }), onProgress);
+  const out = await logged({ kind: 'group', engine: 'local', api: 'summarizer', group: name, system: `${sharedContext}\nContext: Group name: ${name}`, user: input },
+    () => sum.summarize(input, { context: `Group name: ${name}`, signal }));
   onChunk?.(out);
   return out;
 }
@@ -368,18 +472,27 @@ export async function summarizeTab(tab, opts = {}) {
   const engine = opts.engine || pickEngine('tab', st.settings, st.local, st.hasKey);
   const page = await extractTab(tab, { access: opts.access });
   const instructions = instructionsFor(st.settings, opts.groupName, page.url);
-  const sig = cacheKey([engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, fnv(page.text), page.title]);
+  const sig = cacheKey([PROMPT_VERSION, engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, fnv(page.text), page.title]);
   const prev = tabInsight(page.url);
   if (!opts.force && prev?.sig === sig && prev.summary) return putInsight(page.url, {});
   let r;
   if (engine === 'cloud') {
     const { system, user } = tabPrompt({ ...page, instructions, lang: uiLang() });
-    r = parseInsight(await streamGemini({ key: await getApiKey(), model: st.settings.model, system, user, json: true, signal: opts.signal }));
+    const key = await getApiKey();
+    r = parseInsight(await logged({ kind: 'tab', engine: 'cloud', model: st.settings.model, title: page.title, url: page.url, system, user },
+      () => streamGemini({ key, model: st.settings.model, system, user, json: true, signal: opts.signal })));
   } else {
     r = await localInsight(page, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress });
   }
   if (!r.summary) throw new AiError('The AI returned an empty summary.', 'empty');
-  return putInsight(page.url, { summary: r.summary, status: r.status, engine, sig, reason: page.reason, readable: page.readable, title: page.title });
+  // A status set by hand was about the page as it was. The page has changed, so the new analysis wins:
+  // otherwise a stale "Needs you" sits next to a summary that says the PR is merged.
+  const changed = prev && prev.textSig && prev.textSig !== fnv(page.text);
+  return putInsight(page.url, {
+    summary: r.summary, status: r.status, facts: r.facts || '', engine, sig, textSig: fnv(page.text),
+    reason: page.reason, readable: page.readable, title: page.title,
+    ...(changed || opts.force ? { manual: undefined } : {}),
+  });
 }
 
 /**
@@ -416,7 +529,9 @@ export async function summarizeGroup(group, opts = {}) {
   if (engine === 'cloud') {
     onStatus?.('Asking Gemini…');
     const { system, user } = groupPrompt({ name: group.name, tabs: pages, instructions, lang: uiLang() });
-    text = await streamGemini({ key: await getApiKey(), model: st.settings.model, system, user, signal, onChunk });
+    const key = await getApiKey();
+    text = await logged({ kind: 'group', engine: 'cloud', model: st.settings.model, group: group.name, system, user },
+      () => streamGemini({ key, model: st.settings.model, system, user, signal, onChunk }));
   } else {
     onStatus?.('Summarizing on this device…');
     const lines = pages.map(p => `- ${p.title}${p.summary ? `: ${p.summary}` : ''}`);
@@ -431,6 +546,33 @@ export async function summarizeGroup(group, opts = {}) {
 }
 
 /** Start the on-device model download. Call from a click. */
+/**
+ * Drafts instructions for a page rule by filling in INSTRUCTION_TEMPLATE from one example page.
+ * opts: { pattern, tab (an open tab matching the pattern, or null), access, signal }
+ * Only the title and address are sent to Gemini unless the user has agreed to send page content.
+ */
+export async function draftInstructions({ pattern, tab = null, access = false, signal } = {}) {
+  const st = await engineState();
+  const engine = pickEngine('tab', st.settings, st.local, st.hasKey);
+  const cloudOk = engine !== 'cloud' || !!st.settings.cloudConsentAt;
+  const page = tab ? await extractTab(tab, { access: access && cloudOk }) : { title: '', url: '', text: '' };
+  let out;
+  if (engine === 'cloud') {
+    const { system, user } = draftPrompt({ pattern, ...page, lang: uiLang() });
+    const key = await getApiKey();
+    out = await logged({ kind: 'draft', engine: 'cloud', model: st.settings.model, title: page.title, url: page.url, pattern, system, user },
+      () => streamGemini({ key, model: st.settings.model, system, user, signal }));
+  } else {
+    if (st.localApi !== 'prompt') throw new AiError('Drafting needs Chrome’s Prompt API or a Gemini key.', 'no-engine');
+    const { system, user } = draftPrompt({ pattern, ...page, lang: localOut(), max: 5000 });
+    const s = await self.LanguageModel.create({ ...lmIO(), initialPrompts: [{ role: 'system', content: system }] }).catch(e => { throw gestureError(e); });
+    try { out = await logged({ kind: 'draft', engine: 'local', api: 'prompt', title: page.title, url: page.url, pattern, system, user }, () => s.prompt(user, { signal })); } finally { s.destroy?.(); }
+  }
+  const text = cleanDraft(out);
+  if (!text) throw new AiError('The AI returned an empty draft.', 'empty');
+  return text;
+}
+
 export async function downloadLocalModel(onProgress) {
   const { api } = await localAvailability();
   if (api === 'prompt') await getBaseSession(onProgress);
