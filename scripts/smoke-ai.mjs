@@ -269,14 +269,28 @@ try {
   await page.click('[data-nav=dashboard]');
   await page.waitForSelector('.card:has-text("Research") .ai-gtext');
   assert.match(await page.textContent('.card-tab:has-text("/pr/5") .ai-line'), /mentions purple-otter/);
-  assert.equal(await page.locator('.card-tab:has-text("/pr/5") .ai-dot-btn.st-action').count(), 1);
-  assert.match(await page.textContent('.card:has-text("Research") .card-meta'), /Needs you/);
+  assert.equal(await page.locator('.card-tab:has-text("/pr/5") .ai-edge.st-action').count(), 1);
+  assert.match(await page.textContent('.card:has-text("Research") .card-head'), /Needs you/);
+  assert.ok(await page.isVisible('.card:has-text("Research") .st-bar'));
+  assert.ok(await page.isVisible('.card.needs-you:has-text("Research")'));
+  // Most urgent is the default sort: Research (needs you) comes before Other, and /pr/5 is its first tab.
   const order = () => page.$$eval('.card .card-name', ns => ns.map(n => n.textContent.trim()));
-  assert.deepEqual((await order()).slice(0, 2), ['Other', 'Research']);
-  await page.check('[data-act=urgent]');
-  await page.waitForFunction(() => document.querySelector('.card .card-name')?.textContent.trim() === 'Research');
+  assert.deepEqual((await order()).slice(0, 2), ['Research', 'Other']);
+  assert.match(await page.textContent('.card:has-text("Research") .card-tab >> nth=0'), /\/pr\/5/);
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-dashboard.png') });
-  step('dashboard cards show tab summaries, status dots, the group sentence, and sort most urgent first');
+  await page.click('[data-act=sort]');
+  await page.click('.menu button:has-text("Tab strip order")');
+  await page.waitForFunction(() => document.querySelector('.card .card-name')?.textContent.trim() === 'Other');
+  await page.click('[data-act=sort]');
+  await page.click('.menu button:has-text("Most urgent")');
+  await page.waitForFunction(() => document.querySelector('.card .card-name')?.textContent.trim() === 'Research');
+  // Status chips filter the cards.
+  await page.click('.chip.st-action');
+  await page.waitForFunction(() => document.querySelectorAll('.card').length === 1);
+  assert.equal(await page.getAttribute('.chip.st-action', 'aria-pressed'), 'true');
+  await page.click('.chip[data-st=""]');
+  await page.waitForFunction(() => document.querySelectorAll('.card').length >= 2);
+  step('dashboard cards show tab summaries, status edges, the group sentence; sort menu and status filter chips work');
 
   // Gemini key, consent, and cloud summaries.
   await page.click('#settingsBtn');
@@ -291,7 +305,8 @@ try {
   await page.fill('#aiKey', 'good-key');
   await page.click('[data-m=ok]');
   await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
-  await page.click('.card:has-text("Research") [data-act=ai-group]');
+  await page.click('.card:has-text("Research") [data-act=card-more]');
+  await page.click('.menu button:has-text("Summarize group and tabs")');
   await page.waitForSelector('#modal:not([hidden]) :text("Send page content to Google Gemini?")');
   await page.click('[data-m=ok]');
   await page.waitForFunction(() => /^This group is about cloud testing\.$/.test(document.querySelector('.card [data-sum^="group:"] .ai-gtext')?.textContent || ''));

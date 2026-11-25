@@ -246,3 +246,45 @@ export function groupFacts(tabs) {
 export function lastUsed(tabs) {
   return tabs.reduce((m, t) => Math.max(m, t.lastAccessed || 0), 0);
 }
+
+/* ---------- dashboard ordering and grouping ----------
+   These take a status *function*, so they don't care how a status is worked out. */
+
+/**
+ * Order dashboard cards. 'urgent': by `rankOf` (lowest first), then tab strip order.
+ * 'recent': most recently used first. 'manual' (or anything else): tab strip order.
+ */
+export function sortGroups(groups, mode, rankOf = () => 0) {
+  const list = groups.map((g, i) => ({ g, i }));
+  if (mode === 'urgent') list.sort((a, b) => rankOf(a.g) - rankOf(b.g) || a.i - b.i);
+  else if (mode === 'recent') list.sort((a, b) => lastUsed(b.g.tabs) - lastUsed(a.g.tabs) || a.i - b.i);
+  return list.map(x => x.g);
+}
+
+/** Tabs in urgency order (stable): the ones a collapsed card shows first. */
+export function sortTabsBy(tabs, rankOf) {
+  return tabs.map((t, i) => ({ t, i })).sort((a, b) => rankOf(a.t) - rankOf(b.t) || a.i - b.i).map(x => x.t);
+}
+
+/**
+ * Split dashboard groups into the cards shown in the grid (`main`) and the finished ones folded into
+ * a "Done" row at the bottom (`done`). A status filter shows only the groups with that status.
+ */
+export function dashboardSections(groups, statusOf, { filter = null, foldDone = true } = {}) {
+  if (filter) return { main: groups.filter(g => statusOf(g) === filter), done: [] };
+  if (!foldDone) return { main: groups, done: [] };
+  return { main: groups.filter(g => statusOf(g) !== 'done'), done: groups.filter(g => statusOf(g) === 'done') };
+}
+
+/** How many items have each status: {action: 2, done: 1}. Items with no status are counted under 'none'. */
+export function countBy(items, statusOf) {
+  const out = {};
+  for (const x of items) { const s = statusOf(x) || 'none'; out[s] = (out[s] || 0) + 1; }
+  return out;
+}
+
+/** Segments for a card's status bar: [{status, n}] in `order`, then tabs with no status. Empty ones are left out. */
+export function statusSegments(tabs, statusOf, order) {
+  const c = countBy(tabs, statusOf);
+  return [...order, 'none'].filter(s => c[s]).map(s => ({ status: s, n: c[s] }));
+}
