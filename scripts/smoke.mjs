@@ -217,12 +217,21 @@ try {
   assert.equal(await sideW(), 272);
   step('resize the sidebar by dragging, keyboard and double-click reset');
 
-  // Tab Desk reopens on the dashboard when you left it there.
-  await page.click('[data-nav=dashboard]');
+  // Tab Desk always opens on the dashboard, even if you left it on a group.
+  await page.click('[data-nav=group] >> nth=0');
   await page.reload();
   await page.waitForSelector('.card[data-card]');
   assert.equal(await page.getAttribute('[data-nav=dashboard]', 'aria-current'), 'true');
-  step('reopens on the dashboard');
+  step('always opens on the dashboard');
+
+  // Dashboard columns: 3 on a large main area, 2 on medium, 1 on small.
+  const cols = () => page.$eval('.cards', n => getComputedStyle(n).gridTemplateColumns.split(' ').length);
+  for (const [w, n] of [[1600, 3], [1100, 2], [600, 1]]) {
+    await page.setViewportSize({ width: w, height: 820 });
+    assert.equal(await cols(), n, `${w}px wide should show ${n} columns`);
+  }
+  await page.setViewportSize({ width: 1280, height: 820 });
+  step('dashboard shows 3, 2 or 1 columns depending on width');
 
   assert.deepEqual(errors, []);
   step('no page errors');
