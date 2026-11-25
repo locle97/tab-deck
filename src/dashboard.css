@@ -466,6 +466,8 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-check, .ai-radio { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; cursor: pointer; }
 .ai-check input, .ai-radio input { margin: 3px 0 0; accent-color: var(--focus); }
 .ai-indent { margin: -2px 0 6px 24px; }
+.ai-field .ai-check input { width: auto; flex: none; padding: 0; border: 0; border-radius: 0; background: none; }
+.ai-field .ai-check input:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
 .ai-radio > span { display: grid; }
 .ai-radio > span > span { font-size: 12.5px; color: var(--muted); }
 .ai-status-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin: 8px 0; }
