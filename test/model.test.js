@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildModel, findDuplicates, duplicateCount, domainProposals, sortedBySite,
   score, timeAgo, nextColor, shortUrl, siteName, toWorkspace, UNTITLED,
-  groupMoveTarget, neighborMove,
+  groupMoveTarget, neighborMove, cardTabs, groupFacts, lastUsed,
 } from '../src/lib/model.js';
 
 const tab = (id, url, o = {}) => ({ id, url, title: `Tab ${id}`, windowId: 1, index: id, groupId: -1, active: false, ...o });
@@ -150,4 +150,26 @@ test('neighborMove finds the group above or below', () => {
   assert.deepEqual(neighborMove(strip(), 20, 1), { targetId: 30, place: 'after' });
   assert.equal(neighborMove(strip(), 10, -1), null);
   assert.equal(neighborMove(strip(), 40, 1), null);
+});
+
+test('cardTabs shows the first tabs and counts the rest, but never hides just one', () => {
+  const ts = [1, 2, 3, 4, 5, 6].map(i => tab(i, `https://x${i}.com`));
+  assert.deepEqual(cardTabs(ts, 4), { shown: ts.slice(0, 4), hidden: 2 });
+  assert.deepEqual(cardTabs(ts, 5), { shown: ts, hidden: 0 });
+  assert.deepEqual(cardTabs(ts, 4, true), { shown: ts, hidden: 0 });
+  assert.deepEqual(cardTabs([], 4), { shown: [], hidden: 0 });
+});
+
+test('groupFacts counts tabs, distinct sites, sleeping and playing tabs', () => {
+  const ts = [
+    tab(1, 'https://www.a.com/1'), tab(2, 'https://a.com/2', { discarded: true }),
+    tab(3, 'https://b.com', { audible: true }), tab(4, 'chrome://newtab'),
+  ];
+  assert.equal(groupFacts(ts), '4 tabs · 3 sites · 1 sleeping · 1 playing');
+  assert.equal(groupFacts([tab(1, 'https://a.com')]), '1 tab · 1 site');
+});
+
+test('lastUsed is the most recent tab access in a group', () => {
+  assert.equal(lastUsed([tab(1, 'a', { lastAccessed: 5 }), tab(2, 'b', { lastAccessed: 9 }), tab(3, 'c')]), 9);
+  assert.equal(lastUsed([]), 0);
 });

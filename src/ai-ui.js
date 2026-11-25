@@ -65,6 +65,12 @@ export function groupSumButtons() {
   return `<button class="btn" data-act="ai-group" type="button" title="Summarize what this group is about">${IC.spark} Summarize</button>`;
 }
 
+/** Compact Summarize button for a group card on the dashboard. */
+export function cardSumButton() {
+  if (!aiEnabled()) return '';
+  return `<button class="icon-btn ai-card-btn" data-act="ai-group" type="button" title="Summarize what this group is about" aria-label="Summarize this group">${IC.spark}</button>`;
+}
+
 export function groupSumCard(g) {
   if (!aiEnabled()) return '';
   const k = `group:${g.id}`;

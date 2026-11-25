@@ -2,6 +2,7 @@
 
 A Chrome extension page for people who keep many tab groups open. It replaces squinting at the tab strip with:
 
+- **Dashboard.** Every open tab group on one page as a grid of cards, so you can keep track of several projects at once. Each card shows the group's color on its edge, its name, tab count and sites, and its tabs with favicon and title (the first 8, then *+ N more*). Click a tab to switch to it, click the group name for its detail page, *Switch* to switch to the group, and *⋯* for Save & close, color, sort, collapse, ungroup and close. With AI summaries on, the sparkle button on a card summarizes the group right in the card (and each tab row can summarize its tab); a summary made on the group's detail page shows on its card too. Ungrouped tabs get an Inbox card. Tab Desk opens on the dashboard unless you last left it on a group's page. `Alt+0` shows it from anywhere on the page.
 - **Group sidebar.** Every open tab group with its color and tab count, plus an **Inbox** of ungrouped tabs.
   - Drag a group up or down to reorder it. The real tab groups move in Chrome's tab strip too (across windows as well). With a group focused, `Alt+↑` / `Alt+↓` does the same from the keyboard.
   - Click the chevron next to a group to list its tabs under it. Click a tab there to switch to it.

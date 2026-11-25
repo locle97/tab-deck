@@ -63,6 +63,30 @@ try {
   assert.match(await page.textContent('#dupBtn'), /1 duplicate tab/);
   step('duplicate counter');
 
+  // Dashboard: the default view, one card per open group plus the Inbox.
+  assert.equal(await page.getAttribute('[data-nav=dashboard]', 'aria-current'), 'true');
+  await page.waitForFunction(() => document.querySelectorAll('.card[data-card]:not(.inbox)').length === 2);
+  assert.deepEqual(await page.$$eval('.card:not(.inbox) .card-name', ns => ns.map(n => n.textContent)), ['Checkout redesign', 'Incident 4821']);
+  assert.equal(await page.$$eval('.card:has-text("Checkout redesign") .card-tab', r => r.length), 3);
+  assert.match(await page.textContent('.card:has-text("Checkout redesign") .card-meta'), /^3 tabs · 1 site/);
+  assert.ok(await page.isVisible('.card.inbox'));
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'dashboard.png') });
+  step('dashboard shows a card per group with its tabs');
+
+  await page.click('.card:has-text("Incident 4821") .card-tab-btn:has-text("/logs")');
+  await page.waitForFunction(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.url.endsWith('/logs'));
+  await page.bringToFront();
+  step('click a tab on a card to switch to it');
+
+  await page.click('.card:has-text("Incident 4821") [data-act=card-more]');
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'dashboard-menu.png') });
+  await page.click('.menu button:has-text("Open details")');
+  await page.waitForFunction(() => document.querySelector('h1')?.textContent === 'Incident 4821');
+  await page.click('[data-nav=dashboard]');
+  await page.waitForSelector('.card');
+  step('card menu opens the group detail, sidebar returns to the dashboard');
+
+  await page.click('[data-nav=group]:has-text("Checkout redesign")');
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'group.png') });
 
   // Expand a group in the sidebar to list its tabs, then switch to one.
@@ -192,6 +216,13 @@ try {
   await page.dblclick('#sideResizer');
   assert.equal(await sideW(), 272);
   step('resize the sidebar by dragging, keyboard and double-click reset');
+
+  // Tab Desk reopens on the dashboard when you left it there.
+  await page.click('[data-nav=dashboard]');
+  await page.reload();
+  await page.waitForSelector('.card[data-card]');
+  assert.equal(await page.getAttribute('[data-nav=dashboard]', 'aria-current'), 'true');
+  step('reopens on the dashboard');
 
   assert.deepEqual(errors, []);
   step('no page errors');

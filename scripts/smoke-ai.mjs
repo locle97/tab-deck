@@ -232,6 +232,25 @@ try {
   await page.keyboard.press('Escape');
   step('palette lists Summarize');
 
+  // Dashboard cards: the group summary shows on the card, and cards can summarize groups and tabs.
+  await page.click('[data-nav=dashboard]');
+  await page.waitForSelector('.card:has-text("Deep research") [data-sum^="group:"] .ai-text');
+  step('a group summary made on the detail page also shows on its dashboard card');
+  await page.click('.card [data-sum^="group:"] [data-act=ai-dismiss]');
+  await page.waitForFunction(() => !document.querySelector('.card [data-sum^="group:"]'));
+  await page.click('.card:has-text("Deep research") [data-act=ai-group]');
+  await page.waitForFunction(() => /Theme two/.test(document.querySelector('.card [data-sum^="group:"] .ai-text')?.textContent || ''));
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-dashboard.png') });
+  step('Summarize on a dashboard card puts the group summary in the card');
+  await page.hover('.card-tab:has-text("/beta")');
+  await page.click('.card-tab:has-text("/beta") [data-act=ai-tab]');
+  await page.waitForSelector('.card-tabs [data-sum^="tab:"] .ai-text');
+  step('summarize a single tab from its dashboard card');
+  await page.click('.card:has-text("Deep research") [data-act=card-more]');
+  assert.ok(await page.isVisible('.menu button:has-text("AI instructions")'));
+  await page.keyboard.press('Escape');
+  step('card menu offers the group’s AI instructions');
+
   // Turning AI off hides the buttons.
   await page.click('#aiSettingsBtn');
   await page.uncheck('#aiEnabled');

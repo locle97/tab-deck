@@ -223,3 +223,26 @@ export function neighborMove(groups, groupId, dir) {
   if (i < 0 || !n) return null;
   return { targetId: n.id, place: dir < 0 ? 'before' : 'after' };
 }
+
+/** Tabs shown on a dashboard card: the first `limit`, or all when the card is opened up. */
+export function cardTabs(tabs, limit, showAll = false) {
+  if (showAll || tabs.length <= limit + 1) return { shown: tabs, hidden: 0 };
+  return { shown: tabs.slice(0, limit), hidden: tabs.length - limit };
+}
+
+/** One-line facts about a group for its dashboard card: "4 tabs · 2 sites · 1 sleeping". */
+export function groupFacts(tabs) {
+  const sites = new Set(tabs.map(t => siteName(t.url || t.pendingUrl || '')).filter(Boolean)).size;
+  const sleeping = tabs.filter(t => t.discarded || t.frozen).length;
+  const playing = tabs.filter(t => t.audible).length;
+  const parts = [plural(tabs.length, 'tab')];
+  if (sites) parts.push(plural(sites, 'site'));
+  if (sleeping) parts.push(`${sleeping} sleeping`);
+  if (playing) parts.push(`${playing} playing`);
+  return parts.join(' · ');
+}
+
+/** When a group was last used: the most recent lastAccessed of its tabs (0 if unknown). */
+export function lastUsed(tabs) {
+  return tabs.reduce((m, t) => Math.max(m, t.lastAccessed || 0), 0);
+}
