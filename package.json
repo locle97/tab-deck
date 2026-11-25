@@ -1,0 +1,11 @@
+{
+  "name": "tab-desk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension page for managing tab groups: group sidebar, saved workspaces and a Ctrl+K command palette.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

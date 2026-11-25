@@ -1,0 +1,107 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  buildModel, findDuplicates, duplicateCount, domainProposals, sortedBySite,
+  score, timeAgo, nextColor, shortUrl, siteName, toWorkspace, UNTITLED,
+} from '../src/lib/model.js';
+
+const tab = (id, url, o = {}) => ({ id, url, title: `Tab ${id}`, windowId: 1, index: id, groupId: -1, active: false, ...o });
+
+test('buildModel splits grouped tabs from the Inbox and keeps tab order', () => {
+  const tabs = [
+    tab(3, 'https://b.com', { groupId: 10, index: 3 }),
+    tab(1, 'https://a.com', { groupId: 10, index: 1 }),
+    tab(2, 'https://c.com', { index: 2 }),
+    tab(4, 'chrome-extension://x/dashboard.html', { index: 4 }),
+  ];
+  const groups = [{ id: 10, title: 'Work', color: 'blue', collapsed: false, windowId: 1 }];
+  const m = buildModel(tabs, groups, t => t.id === 4);
+  assert.equal(m.groups.length, 1);
+  assert.deepEqual(m.groups[0].tabs.map(t => t.id), [1, 3]);
+  assert.equal(m.groups[0].name, 'Work');
+  assert.deepEqual(m.inbox.map(t => t.id), [2]);
+  assert.equal(m.tabCount, 3);
+});
+
+test('buildModel names untitled groups and numbers windows', () => {
+  const tabs = [tab(1, 'https://a.com', { groupId: 5, windowId: 9 }), tab(2, 'https://b.com', { windowId: 3 })];
+  const m = buildModel(tabs, [{ id: 5, title: '', color: 'red' }]);
+  assert.equal(m.groups[0].name, UNTITLED);
+  assert.equal(m.groups[0].window, 2);
+  assert.equal(m.windowCount, 2);
+});
+
+test('findDuplicates keeps the grouped copy and lists the extras', () => {
+  const tabs = [
+    tab(1, 'https://x.com/pr/1'),
+    tab(2, 'https://x.com/pr/1', { groupId: 7 }),
+    tab(3, 'https://x.com/pr/1', { lastAccessed: 99 }),
+    tab(4, 'https://y.com'),
+  ];
+  const m = buildModel(tabs, [{ id: 7, title: 'G', color: 'blue' }]);
+  const d = findDuplicates(m);
+  assert.equal(d.length, 1);
+  assert.equal(d[0].keep.t.id, 2);
+  assert.deepEqual(d[0].extras.map(x => x.t.id), [3, 1]);
+  assert.equal(duplicateCount(m), 2);
+});
+
+test('findDuplicates prefers the active tab over a grouped one', () => {
+  const tabs = [tab(1, 'https://x.com', { active: true }), tab(2, 'https://x.com', { groupId: 7 })];
+  const d = findDuplicates(buildModel(tabs, [{ id: 7, color: 'blue' }]));
+  assert.equal(d[0].keep.t.id, 1);
+});
+
+test('domainProposals suggests sites with two or more tabs per window', () => {
+  const inbox = [
+    tab(1, 'https://news.ycombinator.com'),
+    tab(2, 'https://news.ycombinator.com/item?id=1'),
+    tab(3, 'https://github.com/a'),
+    tab(4, 'https://www.github.com/b', { windowId: 2 }),
+  ];
+  const p = domainProposals(inbox);
+  assert.equal(p.length, 1);
+  assert.equal(p[0].name, 'Hacker News');
+  assert.deepEqual(p[0].tabs.map(t => t.id), [1, 2]);
+});
+
+test('sortedBySite orders by host, then original position', () => {
+  const ids = sortedBySite([tab(1, 'https://z.com'), tab(2, 'https://a.com/2'), tab(3, 'https://a.com/1')]);
+  assert.deepEqual(ids, [2, 3, 1]);
+});
+
+test('score ranks substring and prefix matches above scattered letters', () => {
+  assert.equal(score('', 'anything'), 1);
+  assert.equal(score('xyz', 'checkout'), 0);
+  assert.ok(score('check', 'Checkout redesign') > score('check', 'Recheck'));
+  assert.ok(score('crd', 'Checkout redesign') > 0);
+  assert.ok(score('check', 'Recheck') > score('crd', 'Checkout redesign'));
+});
+
+test('timeAgo gives compact labels', () => {
+  const now = 1_000_000_000;
+  assert.equal(timeAgo(now - 10_000, now), 'now');
+  assert.equal(timeAgo(now - 5 * 60_000, now), '5m');
+  assert.equal(timeAgo(now - 3 * 3600_000, now), '3h');
+  assert.equal(timeAgo(now - 2 * 86400_000, now), '2d');
+  assert.equal(timeAgo(undefined, now), '');
+});
+
+test('nextColor picks an unused color', () => {
+  assert.equal(nextColor([]), 'grey');
+  assert.equal(nextColor(['grey', 'blue']), 'red');
+});
+
+test('url helpers strip scheme and www', () => {
+  assert.equal(shortUrl('https://www.example.com/a?b'), 'example.com/a?b');
+  assert.equal(siteName('https://www.example.com/a'), 'example.com');
+  assert.equal(siteName('not a url'), '');
+});
+
+test('toWorkspace keeps name, color and tab URLs', () => {
+  const w = toWorkspace({ title: 'Trip', color: 'cyan', tabs: [tab(1, 'https://a.com'), tab(2, '')] }, 5);
+  assert.equal(w.name, 'Trip');
+  assert.equal(w.color, 'cyan');
+  assert.equal(w.savedAt, 5);
+  assert.deepEqual(w.tabs.map(t => t.url), ['https://a.com']);
+});
