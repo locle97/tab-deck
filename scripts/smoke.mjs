@@ -69,9 +69,27 @@ try {
   assert.deepEqual(await page.$$eval('.card:not(.inbox) .card-name', ns => ns.map(n => n.textContent)), ['Checkout redesign', 'Incident 4821']);
   assert.equal(await page.$$eval('.card:has-text("Checkout redesign") .card-tab', r => r.length), 3);
   assert.match(await page.textContent('.card:has-text("Checkout redesign") .card-meta'), /^3 tabs · 1 site/);
-  assert.ok(await page.isVisible('.card.inbox'));
+  assert.ok(await page.isVisible('.inbox-row'));
+  assert.ok(await page.$$eval('.inbox-row .inbox-tab', r => r.length) >= 3);
+  assert.match(await page.textContent('.dash-bar .dash-count'), /^2 groups · \d+ tabs/);
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'dashboard.png') });
-  step('dashboard shows a card per group with its tabs');
+  step('dashboard shows a card per group with its tabs, and the Inbox as a slim row');
+
+  // Header tools: list view, search, Inbox row.
+  await page.click('[data-act=view][data-v=list]');
+  assert.equal(await page.$eval('.cards', n => getComputedStyle(n).gridTemplateColumns.split(' ').length), 1);
+  await page.reload();
+  await page.waitForSelector('.dash.is-list');
+  await page.click('[data-act=view][data-v=grid]');
+  await page.waitForSelector('.dash:not(.is-list)');
+  await page.click('[data-act=search]');
+  await page.waitForSelector('#pal:not([hidden])');
+  await page.keyboard.press('Escape');
+  await page.click('.inbox-open');
+  await page.waitForFunction(() => document.querySelector('h1')?.textContent === 'Inbox');
+  await page.click('[data-nav=dashboard]');
+  await page.waitForSelector('.dash-bar');
+  step('header switches grid/list (remembered) and opens search; the Inbox row opens the Inbox');
 
   await page.click('.card:has-text("Incident 4821") .card-tab-btn:has-text("/logs")');
   await page.waitForFunction(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.url.endsWith('/logs'));
@@ -225,10 +243,12 @@ try {
   step('always opens on the dashboard');
 
   // Dashboard columns: 3 on a large main area, 2 on medium, 1 on small.
-  const cols = () => page.$eval('.cards', n => getComputedStyle(n).gridTemplateColumns.split(' ').length);
+  const cols = () => page.evaluate(() => getComputedStyle(document.querySelector('.cards')).gridTemplateColumns.split(' ').length);
   for (const [w, n] of [[1600, 3], [1100, 2], [600, 1]]) {
     await page.setViewportSize({ width: w, height: 820 });
-    assert.equal(await cols(), n, `${w}px wide should show ${n} columns`);
+    let got = 0;
+    for (let k = 0; k < 30 && got !== n; k++) { got = await cols(); if (got !== n) await page.waitForTimeout(100); }
+    assert.equal(got, n, `${w}px wide should show ${n} columns`);
   }
   await page.setViewportSize({ width: 1280, height: 820 });
   step('dashboard shows 3, 2 or 1 columns depending on width');

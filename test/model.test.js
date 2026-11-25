@@ -173,3 +173,39 @@ test('lastUsed is the most recent tab access in a group', () => {
   assert.equal(lastUsed([tab(1, 'a', { lastAccessed: 5 }), tab(2, 'b', { lastAccessed: 9 }), tab(3, 'c')]), 9);
   assert.equal(lastUsed([]), 0);
 });
+
+/* ---------- dashboard ordering and grouping ---------- */
+import { sortGroups, sortTabsBy, dashboardSections, countBy, statusSegments } from '../src/lib/model.js';
+
+const dg = (id, st, last) => ({ id, st, tabs: [{ lastAccessed: last }] });
+const dgs = [dg(1, 'done', 30), dg(2, 'action', 10), dg(3, null, 50), dg(4, 'action', 20)];
+const rank = s => ({ action: 0, working: 1, waiting: 2, done: 3, info: 4 }[s] ?? 2.5);
+
+test('sortGroups: urgent by rank then strip order, recent by last use, manual keeps order', () => {
+  assert.deepEqual(sortGroups(dgs, 'urgent', g => rank(g.st)).map(g => g.id), [2, 4, 3, 1]);
+  assert.deepEqual(sortGroups(dgs, 'recent').map(g => g.id), [3, 1, 4, 2]);
+  assert.deepEqual(sortGroups(dgs, 'manual').map(g => g.id), [1, 2, 3, 4]);
+  assert.notEqual(sortGroups(dgs, 'manual'), dgs, 'returns a new array');
+});
+
+test('sortTabsBy is stable', () => {
+  const tabs = [{ id: 1, s: 'done' }, { id: 2, s: 'action' }, { id: 3, s: 'done' }, { id: 4, s: 'action' }];
+  assert.deepEqual(sortTabsBy(tabs, t => rank(t.s)).map(t => t.id), [2, 4, 1, 3]);
+});
+
+test('dashboardSections folds Done groups, or filters by one status', () => {
+  const st = g => g.st;
+  const r = dashboardSections(dgs, st);
+  assert.deepEqual(r.main.map(g => g.id), [2, 3, 4]);
+  assert.deepEqual(r.done.map(g => g.id), [1]);
+  assert.deepEqual(dashboardSections(dgs, st, { filter: 'action' }).main.map(g => g.id), [2, 4]);
+  assert.deepEqual(dashboardSections(dgs, st, { filter: 'done' }), { main: [dgs[0]], done: [] });
+  assert.deepEqual(dashboardSections(dgs, st, { foldDone: false }).main.length, 4);
+});
+
+test('countBy and statusSegments', () => {
+  assert.deepEqual(countBy(dgs, g => g.st), { done: 1, action: 2, none: 1 });
+  const tabs = [{ s: 'done' }, { s: null }, { s: 'action' }, { s: 'done' }];
+  assert.deepEqual(statusSegments(tabs, t => t.s, ['action', 'working', 'waiting', 'done', 'info']),
+    [{ status: 'action', n: 1 }, { status: 'done', n: 2 }, { status: 'none', n: 1 }]);
+});

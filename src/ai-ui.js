@@ -104,15 +104,31 @@ function tabLineInner(t) {
   return '';
 }
 
-/** Status pill for a tab. `compact` shows only the dot (dashboard cards). */
-export function tabStatus(t, { compact = false } = {}) {
-  if (!aiEnabled()) return '';
-  return `<span class="ai-st-wrap" data-ai-st="${t.id}" data-compact="${compact ? 1 : 0}">${tabStatusInner(t, compact)}</span>`;
+/** A tab's status (set by hand or by the AI), or null. How it is worked out stays in here. */
+export function tabStatusOf(t) {
+  if (!aiEnabled()) return null;
+  return effectiveStatus(AI.tabInsight(urlOf(t)));
 }
-function tabStatusInner(t, compact) {
+
+/**
+ * Status control for a tab. Default: a pill. `compact`: only the dot. `edge`: a thin colored bar on
+ * the row's left edge (dashboard cards), which is also the button that opens the status menu.
+ */
+export function tabStatus(t, { compact = false, edge = false } = {}) {
+  if (!aiEnabled()) return '';
+  const mode = edge ? 'edge' : compact ? 'dot' : 'pill';
+  return `<span class="ai-st-wrap${edge ? ' edge' : ''}" data-ai-st="${t.id}" data-mode="${mode}">${tabStatusInner(t, mode)}</span>`;
+}
+function tabStatusInner(t, mode) {
+  const compact = mode !== 'pill';
   const ins = AI.tabInsight(urlOf(t));
   const s = effectiveStatus(ins);
   const label = s ? STATUSES[s].label : 'No status';
+  if (mode === 'edge') {
+    const run = busy.has(t.id) ? ' is-busy' : queued.has(t.id) ? ' is-queued' : '';
+    const tip = busy.has(t.id) ? 'Summarizing…' : `${s ? label : 'No status yet'}${s ? (ins?.manual ? ' (set by you)' : ' (from AI)') : ''}. Click to change.`;
+    return `<button class="ai-edge st-${s || 'none'}${run}" data-act="ai-status" type="button" title="${esc(tip)}" aria-label="Status: ${esc(label)}"></button>`;
+  }
   if (!state.settings.tabLines && busy.has(t.id)) {
     return compact ? '<span class="ai-spin" title="Summarizing…" aria-label="Summarizing"></span>' : '<span class="ai-st st-none static"><span class="ai-spin" aria-hidden="true"></span>Summarizing…</span>';
   }
@@ -141,6 +157,20 @@ function groupStatusInner(g) {
   return `<span class="ai-st st-${s} static" title="Most urgent tab status in this group"><i></i>${esc(STATUSES[s].label)}${n > 1 ? ` · ${n}` : ''}</span>`;
 }
 
+/** Summarize several groups, one after another, after one access / consent check. */
+export function summarizeAll(ids) {
+  if (!aiEnabled() || !ids.length) return;
+  const s = state.settings;
+  const engine = chooseEngine({ kind: 'group', setting: s.engine, local: state.local, hasKey: state.hasKey });
+  if (!state.access && !s.pageAccessDeclined) return explainAccess(() => summarizeAll(ids));
+  if (engine === 'cloud' && !s.cloudConsentAt) return askCloudConsent('group', () => summarizeAll(ids));
+  (async () => { for (const id of ids) await runGroup(id, false); })();
+}
+/** Summarize one group and its tabs (call from a click). */
+export const summarizeGroup = g => start('group', g.id);
+export const sparkIcon = () => IC.spark;
+export const anyGroupRunning = () => [...groupRuns.values()].some(r => r.status === 'running');
+
 export function groupSumButtons() {
   if (!aiEnabled()) return '';
   return `<button class="btn" data-act="ai-group" type="button" title="Summarize this group and each of its tabs">${IC.spark} Summarize</button>`;
@@ -161,7 +191,30 @@ export function groupSumCard(g, { detail = false } = {}) {
     const own = state.settings.groups[groupKey(g.name)];
     return detail && own ? `<div class="ai-instr-chip">${IC.note}<span>This group has its own AI instructions.</span><button class="link" data-act="ai-instr" type="button">Edit</button></div>` : '';
   }
-  return `<div data-sum="group:${g.id}">${groupSumInner(g, detail)}</div>`;
+  return `<div data-sum="group:${g.id}"${detail ? '' : ' class="ai-gline-wrap"'}>${detail ? groupSumInner(g, true) : groupLineInner(g)}</div>`;
+}
+
+/** On a dashboard card: the group's summary as one muted line, with refresh and edit on hover. */
+function groupLineInner(g) {
+  const run = groupRuns.get(g.id);
+  const ins = AI.groupInsight(g.name);
+  if (run?.status === 'running') {
+    const text = run.text || run.statusText || 'Working…';
+    return `<div class="ai-gline is-running" role="status"><span class="ai-spin" aria-hidden="true"></span><p class="ai-gtext dim">${esc(text)}</p>
+      <span class="ai-tools"><button class="icon-btn" data-act="ai-stop" type="button" title="Stop" aria-label="Stop summarizing">${IC.close}</button></span></div>`;
+  }
+  if (run?.status === 'error') {
+    const fix = ['key', 'model', 'no-engine'].includes(run.code) ? 'ai-settings' : 'ai-refresh';
+    return `<div class="ai-gline is-error"><p class="ai-gtext ai-bad" title="${esc(run.error)}">${esc(run.error)}</p>
+      <span class="ai-tools always"><button class="link" data-act="${fix}" type="button">${fix === 'ai-settings' ? 'Settings' : 'Try again'}</button></span></div>`;
+  }
+  if (!ins?.summary) return '';
+  const meta = `${ins.engine === 'cloud' ? 'Gemini · cloud' : 'On-device'} · ${ago(ins.at)}`;
+  return `<div class="ai-gline"><p class="ai-gtext" data-act="ai-expand" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</p>
+    <span class="ai-tools">
+      <button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${IC.refresh}</button>
+      <button class="icon-btn" data-act="ai-instr" type="button" title="AI instructions for this group" aria-label="AI instructions for this group">${IC.note}</button>
+    </span></div>`;
 }
 
 function groupSumInner(g, detail) {
@@ -209,7 +262,9 @@ export function aiCommands(cur) {
 export function groupMenuItems(g) {
   if (!aiEnabled()) return [];
   const has = !!state.settings.groups[groupKey(g.name)];
-  return [{ html: `<span>${has ? 'Edit' : 'Add'} AI instructions for this group…</span>`, run: () => openGroupInstructions(g) }];
+  const items = [];
+  items.push({ html: `<span>${has ? 'Edit' : 'Add'} AI instructions for this group…</span>`, run: () => openGroupInstructions(g) });
+  return items;
 }
 
 /** Keep a group's instructions (and summary) when it is renamed. */
@@ -235,6 +290,7 @@ export function handleAiAction(a, el, row, g) {
     case 'ai-instr': if (g) openGroupInstructions(g); return true;
     case 'ai-settings': openAiSettings(); return true;
     case 'ai-status': if (tid != null) statusMenu(el, tid); return true;
+    case 'ai-expand': el.classList.toggle('is-open'); return true;
   }
   return false;
 }
@@ -390,6 +446,7 @@ function schedulePaint() {
     new Set([...document.querySelectorAll('[data-ai-tab], [data-ai-st]')].map(el => +(el.dataset.aiTab || el.dataset.aiSt))).forEach(paintTab);
     document.querySelectorAll('[data-ai-gst]').forEach(el => { const g = ctx.groupById(+el.dataset.aiGst); if (g) el.innerHTML = groupStatusInner(g); });
     document.querySelectorAll('[data-sum^="group:"]').forEach(el => paintGroup(+el.dataset.sum.split(':')[1]));
+    ctx.onPainted?.();
   }, 60);
 }
 
@@ -397,7 +454,7 @@ function paintTab(id) {
   const x = ctx.tabById(id);
   if (!x) return;
   document.querySelectorAll(`[data-ai-tab="${id}"]`).forEach(el => { el.innerHTML = tabLineInner(x.t); });
-  document.querySelectorAll(`[data-ai-st="${id}"]`).forEach(el => { el.innerHTML = tabStatusInner(x.t, el.dataset.compact === '1'); });
+  document.querySelectorAll(`[data-ai-st="${id}"]`).forEach(el => { el.innerHTML = tabStatusInner(x.t, el.dataset.mode); });
   if (x.owner) document.querySelectorAll(`[data-ai-gst="${x.owner.id}"]`).forEach(el => { el.innerHTML = groupStatusInner(x.owner); });
 }
 
@@ -408,7 +465,7 @@ function paintGroup(id) {
   if (!els.length && (groupRuns.has(id) || AI.groupInsight(g.name))) { ctx.renderMain(); return; }
   els.forEach(el => {
     if (!groupRuns.has(id) && !AI.groupInsight(g.name)) { el.remove(); return; }
-    el.innerHTML = groupSumInner(g, !el.closest('.card'));
+    el.innerHTML = el.closest('.card') ? groupLineInner(g) : groupSumInner(g, true);
   });
 }
 
