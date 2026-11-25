@@ -345,9 +345,9 @@ export async function engineState() {
 function pickEngine(kind, settings, local, hasKey) {
   const e = chooseEngine({ kind, setting: settings.engine, local, hasKey });
   if (e) return e;
-  if (settings.engine === 'cloud') throw new AiError('Add a Gemini API key in AI settings to use the cloud engine.', 'no-engine');
-  if (settings.engine === 'local') throw new AiError('On-device AI isn’t available on this device. Add a Gemini API key in AI settings to use the cloud instead.', 'no-engine');
-  throw new AiError('On-device AI isn’t available here (it needs desktop Chrome 138+ with enough memory and disk). Add a Gemini API key in AI settings to use Gemini instead.', 'no-engine');
+  if (settings.engine === 'cloud') throw new AiError('Add a Gemini API key in Settings to use the cloud engine.', 'no-engine');
+  if (settings.engine === 'local') throw new AiError('On-device AI isn’t available on this device. Add a Gemini API key in Settings to use the cloud instead.', 'no-engine');
+  throw new AiError('On-device AI isn’t available here (it needs desktop Chrome 138+ with enough memory and disk). Add a Gemini API key in Settings to use Gemini instead.', 'no-engine');
 }
 
 /** Which engine a summary would use. Returns 'local' | 'cloud' (throws AiError when neither works). */

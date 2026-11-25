@@ -145,8 +145,12 @@ try {
   step('no automatic summaries before the on-device model is downloaded');
 
   // Settings: general instructions and a URL rule.
-  await page.click('#aiSettingsBtn');
-  await page.waitForSelector('.ai-settings');
+  await page.click('#settingsBtn');
+  await page.waitForSelector('.settings-dialog [role=tab][data-tab=general][aria-selected=true]');
+  assert.equal(await page.textContent('#settingsBtn'), 'Settings');
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'settings-general.png') });
+  assert.equal(await page.isVisible('#aiGeneral'), false);
+  await page.click('[role=tab][data-tab=instructions]');
   await page.fill('#aiGeneral', 'Write in Vietnamese.');
   await page.click('#aiAddRule');
   await page.fill('.ai-rule:last-child .ai-rule-pat', `localhost:${port}/pr/*`);
@@ -161,7 +165,7 @@ try {
     await page.screenshot({ path: join(SHOTS, 'ai-settings-rules.png') });
   }
   await page.click('[data-m=ok]');
-  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('AI settings saved'));
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
   let saved = (await page.evaluate(() => chrome.storage.local.get('aiSettings'))).aiSettings;
   assert.equal(saved.general, 'Write in Vietnamese.');
   assert.deepEqual(saved.rules, [{ pattern: `localhost:${port}/pr/*`, instructions: 'PR rule: say if my review is needed.' }]);
@@ -241,13 +245,18 @@ try {
   step('dashboard cards show tab summaries, status dots, the group sentence, and sort most urgent first');
 
   // Gemini key, consent, and cloud summaries.
-  await page.click('#aiSettingsBtn');
+  await page.click('#settingsBtn');
+  // Remembers the last tab (Summary instructions); arrow keys move between tabs.
+  await page.waitForSelector('[role=tab][data-tab=instructions][aria-selected=true]');
+  await page.focus('[role=tab][data-tab=instructions]');
+  await page.keyboard.press('ArrowUp');
+  await page.waitForSelector('#aiKey', { state: 'visible' });
   await page.fill('#aiKey', 'bad');
   await page.click('#aiKeyTest');
   await page.waitForSelector('#aiKeyMsg .ai-bad');
   await page.fill('#aiKey', 'good-key');
   await page.click('[data-m=ok]');
-  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('AI settings saved'));
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
   await page.click('.card:has-text("Research") [data-act=ai-group]');
   await page.waitForSelector('#modal:not([hidden]) :text("Send page content to Google Gemini?")');
   await page.click('[data-m=ok]');
@@ -259,10 +268,10 @@ try {
   step('with a key, the group sentence comes from Gemini after consent, with instructions, key in a header');
 
   // Gemini for tabs: JSON summary + status.
-  await page.click('#aiSettingsBtn');
+  await page.click('#settingsBtn');
   await page.check('input[name=aiEngine][value=cloud]');
   await page.click('[data-m=ok]');
-  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('AI settings saved'));
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
   await page.click('[data-nav=group]:has-text("Research")');
   await page.hover('.tab:has-text("/pr/5")');
   await page.click('.tab:has-text("/pr/5") [data-act=ai-tab]');
@@ -288,7 +297,7 @@ try {
   step('palette lists Summarize');
 
   // Turning AI off hides lines, statuses and buttons.
-  await page.click('#aiSettingsBtn');
+  await page.click('#settingsBtn');
   await page.uncheck('#aiEnabled');
   await page.click('[data-m=ok]');
   await page.waitForFunction(() => !document.querySelector('[data-act=ai-group]'));

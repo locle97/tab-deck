@@ -475,6 +475,7 @@ function moveMenu(anchor, ids) {
 
 /* ---------- modals ---------- */
 function openModal(html, wire) {
+  $('#modalBox').className = 'dialog';
   $('#modalBox').innerHTML = html;
   $('#modal').hidden = false;
   wire?.($('#modalBox'));
