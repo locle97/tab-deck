@@ -351,9 +351,9 @@ export function geminiError(status, body) {
     const ri = (j?.error?.details || []).find(d => d.retryDelay);
     if (ri) retry = parseFloat(ri.retryDelay) || 0;
   } catch {}
-  if (status === 400 && /api key/i.test(msg)) return { code: 'key', message: 'Your Gemini API key was rejected. Check it in AI settings.' };
-  if (status === 401 || status === 403) return { code: 'key', message: 'Your Gemini API key was rejected. Check it in AI settings.' };
-  if (status === 404) return { code: 'model', message: 'Gemini doesn’t know that model name. Check the model in AI settings.' };
+  if (status === 400 && /api key/i.test(msg)) return { code: 'key', message: 'Your Gemini API key was rejected. Check it in Settings.' };
+  if (status === 401 || status === 403) return { code: 'key', message: 'Your Gemini API key was rejected. Check it in Settings.' };
+  if (status === 404) return { code: 'model', message: 'Gemini doesn’t know that model name. Check the model in Settings.' };
   if (status === 429) return { code: 'rate', message: 'Gemini rate limit reached. Try again in a moment.', retry };
   if (status >= 500) return { code: 'server', message: 'Gemini had a problem. Try again in a moment.' };
   return { code: 'other', message: msg ? `Gemini: ${msg}` : `Gemini request failed (${status}).` };

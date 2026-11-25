@@ -43,7 +43,7 @@ export async function initAi(c) {
   AI.onInsightsChanged(schedulePaint);
   chrome.permissions.onAdded.addListener(refreshAccess);
   chrome.permissions.onRemoved.addListener(refreshAccess);
-  document.getElementById('aiSettingsBtn')?.addEventListener('click', () => openAiSettings());
+  document.getElementById('settingsBtn')?.addEventListener('click', () => openAiSettings());
   paintSideButton();
 }
 
@@ -55,11 +55,9 @@ async function refreshState() {
 async function refreshAccess() { state.access = await AI.hasPageAccess(); }
 
 function paintSideButton() {
-  const b = document.getElementById('aiSettingsBtn');
+  const b = document.getElementById('settingsBtn');
   if (!b) return;
-  const s = state.settings;
-  const engine = !s.enabled ? 'Off' : s.engine === 'cloud' ? 'Gemini API' : s.engine === 'local' ? 'On-device' : state.hasKey ? 'Auto' : 'On-device';
-  b.innerHTML = `${IC.spark}<span style="flex:1">AI summaries</span><span class="ai-side-state">${engine}</span>`;
+  b.innerHTML = `${IC.gear}<span>Settings</span>`;
 }
 
 const esc = s => ctx.esc(s);
@@ -156,7 +154,7 @@ function groupSumInner(g, detail) {
     body = run.text ? `<p class="ai-gtext">${esc(run.text)}</p>` : '';
     body += `<div class="ai-status" role="status">${run.progress != null ? `<span class="ai-bar"><i style="width:${Math.round(run.progress * 100)}%"></i></span>` : '<span class="ai-spin" aria-hidden="true"></span>'}${esc(run.statusText || 'Working…')}</div>`;
   } else if (run?.status === 'error') {
-    const fix = ['key', 'model', 'no-engine'].includes(run.code) ? '<button class="btn sm" data-act="ai-settings" type="button">Open AI settings</button>' : '<button class="btn sm" data-act="ai-refresh" type="button">Try again</button>';
+    const fix = ['key', 'model', 'no-engine'].includes(run.code) ? '<button class="btn sm" data-act="ai-settings" type="button">Open Settings</button>' : '<button class="btn sm" data-act="ai-refresh" type="button">Try again</button>';
     body = `${ins?.summary ? `<p class="ai-gtext">${esc(ins.summary)}</p>` : ''}<div class="ai-error">${esc(run.error)} ${fix}</div>`;
   } else if (ins?.summary) {
     body = `<p class="ai-gtext">${esc(ins.summary)}</p>`;
@@ -178,13 +176,13 @@ function groupSumInner(g, detail) {
 }
 
 export function aiCommands(cur) {
-  if (!aiEnabled()) return [{ type: 'cmd', label: 'AI settings', sub: 'AI summaries are off', ico: IC.gear, run: () => openAiSettings() }];
+  if (!aiEnabled()) return [{ type: 'cmd', label: 'Settings', sub: 'AI summaries are off', ico: IC.gear, run: () => openAiSettings() }];
   const c = [];
   if (cur) {
     c.push({ type: 'cmd', label: `Summarize “${cur.name}”`, sub: 'One sentence for the group and each tab, with statuses', ico: IC.spark, run: () => start('group', cur.id) });
     c.push({ type: 'cmd', label: `AI instructions for “${cur.name}”`, sub: 'Tell the AI how to summarize this group', ico: IC.note, run: () => openGroupInstructions(cur) });
   }
-  c.push({ type: 'cmd', label: 'AI settings', sub: 'Engine, Gemini API key, instructions for sites and pages', ico: IC.gear, run: () => openAiSettings() });
+  c.push({ type: 'cmd', label: 'Settings', sub: 'AI engine, Gemini API key, summary instructions', ico: IC.gear, run: () => openAiSettings() });
   return c;
 }
 
@@ -436,14 +434,14 @@ function askCloudConsent(kind, then) {
   ctx.openModal(`<div class="dialog-head"><h2>Send page content to Google Gemini?</h2>
       <p>${kind === 'group' ? 'For a group summary, the text of the readable tabs in the group' : 'The text of this page'} will be sent to Google’s Gemini API using your API key.</p></div>
     <div class="dialog-body ai-muted"><p>Google handles it under the Gemini API terms for your key. On the free tier, Google may use what you send to improve its products. Tab Desk has no server of its own and never sees your data.</p>
-      <p>Summaries made by Gemini are marked <span class="ai-engine cloud">Gemini · cloud</span>. You’ll only be asked once; you can turn the cloud off any time in AI settings.</p></div>
+      <p>Summaries made by Gemini are marked <span class="ai-engine cloud">Gemini · cloud</span>. You’ll only be asked once; you can turn the cloud off any time in Settings.</p></div>
     <div class="dialog-foot">${localOk ? '<button class="btn" data-m="local" type="button">Use on-device instead</button>' : ''}<button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Send to Gemini</button></div>`,
   box => {
     box.querySelector('[data-m=cancel]').onclick = ctx.closeModal;
     box.querySelector('[data-m=local]')?.addEventListener('click', async () => {
       ctx.closeModal();
       state.settings = await AI.saveSettings({ engine: 'local' });
-      ctx.toast('Summaries will stay on this device. You can change this in AI settings.');
+      ctx.toast('Summaries will stay on this device. You can change this in Settings.');
       then();
     });
     box.querySelector('[data-m=ok]').onclick = async () => {
@@ -514,7 +512,11 @@ function ruleCount(pattern) {
   return { text: `${kind} · matches ${n === 1 ? '1 open tab' : `${n} open tabs`}`, bad: false };
 }
 
-export async function openAiSettings({ focus, newRule, rulesFor: forUrl } = {}) {
+const TAB_KEY = 'tabdesk.settingsTab';
+const lastTab = () => { try { return localStorage.getItem(TAB_KEY) === 'instructions' ? 'instructions' : 'general'; } catch { return 'general'; } };
+
+export async function openAiSettings(opts = {}) {
+  const { focus, newRule, rulesFor: forUrl } = opts;
   await refreshState();
   const s = state.settings;
   const key = await AI.getApiKey();
@@ -523,8 +525,17 @@ export async function openAiSettings({ focus, newRule, rulesFor: forUrl } = {}) 
   const rules = [...s.rules];
   if (newRule != null && !rules.some(r => r.pattern === newRule)) rules.push({ pattern: newRule, instructions: '' });
   const radio = (name, v, cur, label, sub) => `<label class="ai-radio"><input type="radio" name="${name}" value="${v}" ${cur === v ? 'checked' : ''}><span><b>${label}</b><span>${sub}</span></span></label>`;
-  ctx.openModal(`<div class="dialog-head"><h2>AI summaries</h2><p>One sentence and a status for every tab. Runs on your device by default; add your own Gemini API key for the cloud.</p></div>
-    <div class="dialog-body ai-settings">
+  const tab = focus === 'general' || newRule != null || forUrl ? 'instructions' : (opts.tab || lastTab());
+  ctx.openModal(`<div class="dialog-head"><h2>Settings</h2></div>
+    <div class="settings-layout">
+      <nav class="settings-nav" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
+        <button class="settings-tab" role="tab" id="setTab-general" data-tab="general" aria-controls="setPanel-general" aria-selected="${tab === 'general'}" tabindex="${tab === 'general' ? 0 : -1}" type="button">${IC.gear}<span>General</span></button>
+        <button class="settings-tab" role="tab" id="setTab-instructions" data-tab="instructions" aria-controls="setPanel-instructions" aria-selected="${tab === 'instructions'}" tabindex="${tab === 'instructions' ? 0 : -1}" type="button">${IC.note}<span>Summary instructions</span></button>
+      </nav>
+      <div class="dialog-body ai-settings settings-panels">
+      <section class="settings-panel" role="tabpanel" id="setPanel-general" aria-labelledby="setTab-general" ${tab === 'general' ? '' : 'hidden'}>
+      <h3 class="first">AI summaries</h3>
+      <p class="ai-muted ai-small">One sentence and a status for every tab. Runs on your device by default; add your own Gemini API key for the cloud.</p>
       <label class="ai-check"><input type="checkbox" id="aiEnabled" ${s.enabled ? 'checked' : ''}><span>Show AI summaries and statuses</span></label>
 
       <h3>Engine</h3>
@@ -550,30 +561,60 @@ export async function openAiSettings({ focus, newRule, rulesFor: forUrl } = {}) 
       <div class="ai-muted ai-small" id="aiKeyMsg">Get a key at <a href="${AI_STUDIO}" target="_blank" rel="noopener">Google AI Studio</a>. It’s stored unencrypted in this Chrome profile only (not synced). Use a key limited to the Gemini API.</div>
       <label class="ai-field"><span>Gemini model</span><input id="aiModel" type="text" spellcheck="false" value="${esc(s.model)}" placeholder="${DEFAULT_MODEL}"></label>
 
-      <h3>Custom instructions</h3>
-      <label class="ai-field"><span>General instructions, for every summary</span>
-        <textarea id="aiGeneral" rows="3" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. Write in Vietnamese.">${esc(s.general)}</textarea></label>
-
-      <div class="ai-field" id="aiRulesField"><span>Instructions for sites and pages</span>
-        <div class="ai-muted ai-small">A site (<code>github.com</code>) covers all its pages. A page pattern matches the whole address without https:// — <code>*</code> is one part of the path, <code>**</code> is anything — so <code>github.com/*/*</code> is a repo’s home, <code>github.com/*/*/pulls</code> its pull request list and <code>github.com/*/*/pull/*</code> one pull request. Or write a <code>/regular expression/</code>. Every matching rule applies, top to bottom.</div>
-        <div id="aiRules">${rules.map(ruleRow).join('')}</div>
-        <button class="btn sm" id="aiAddRule" type="button" ${rules.length >= MAX_RULES ? 'disabled' : ''}>+ Add rule</button>
-      </div>
-
-      <div class="ai-field"><span>Group instructions</span>
-        ${groupRows.length ? `<ul class="ai-glist">${groupRows.map(([k, v]) => `<li data-gk="${esc(k)}"><b>${esc(k)}</b><span>${esc(v.length > 90 ? v.slice(0, 90) + '…' : v)}</span><button class="icon-btn" data-m="gdel" type="button" title="Remove" aria-label="Remove instructions for ${esc(k)}">${IC.close}</button></li>`).join('')}</ul>`
-          : '<div class="ai-muted ai-small">None yet. Open a group and choose “AI instructions” from its ⋯ menu.</div>'}
-      </div>
-
       <h3>Privacy</h3>
       <div class="ai-status-line"><span class="ai-dot ${state.access ? 'available' : 'unavailable'}"></span><span id="aiAccessText">Page access: ${state.access ? 'Tab Desk can read the text of pages it summarizes.' : 'Off. Summaries use titles and addresses only.'}</span>
         <button class="btn sm" id="aiAccess" type="button">${state.access ? 'Revoke' : 'Allow'}</button></div>
       <div class="ai-status-line"><span id="aiSavedText">${saved} saved tab ${saved === 1 ? 'summary' : 'summaries'} on this device.</span><button class="btn sm" id="aiClear" type="button" ${saved ? '' : 'disabled'}>Clear</button></div>
       ${s.cloudConsentAt ? '<div class="ai-muted ai-small">You agreed to send page content to Gemini. Removing your key resets this.</div>' : ''}
+      </section>
+
+      <section class="settings-panel" role="tabpanel" id="setPanel-instructions" aria-labelledby="setTab-instructions" ${tab === 'instructions' ? '' : 'hidden'}>
+      <h3 class="first">General instructions</h3>
+      <label class="ai-field"><span>Added to every summary</span>
+        <textarea id="aiGeneral" rows="3" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. Write in Vietnamese.">${esc(s.general)}</textarea></label>
+
+      <h3>Sites and pages</h3>
+      <div class="ai-field" id="aiRulesField">
+        <div class="ai-muted ai-small">A site (<code>github.com</code>) covers all its pages. A page pattern matches the whole address without https:// — <code>*</code> is one part of the path, <code>**</code> is anything — so <code>github.com/*/*</code> is a repo’s home, <code>github.com/*/*/pulls</code> its pull request list and <code>github.com/*/*/pull/*</code> one pull request. Or write a <code>/regular expression/</code>. Every matching rule applies, top to bottom.</div>
+        <div id="aiRules">${rules.map(ruleRow).join('')}</div>
+        <button class="btn sm" id="aiAddRule" type="button" ${rules.length >= MAX_RULES ? 'disabled' : ''}>+ Add rule</button>
+      </div>
+
+      <h3>Groups</h3>
+      <div class="ai-field">
+        ${groupRows.length ? `<ul class="ai-glist">${groupRows.map(([k, v]) => `<li data-gk="${esc(k)}"><b>${esc(k)}</b><span>${esc(v.length > 90 ? v.slice(0, 90) + '…' : v)}</span><button class="icon-btn" data-m="gdel" type="button" title="Remove" aria-label="Remove instructions for ${esc(k)}">${IC.close}</button></li>`).join('')}</ul>`
+          : '<div class="ai-muted ai-small">None yet. Open a group and choose “AI instructions” from its ⋯ menu.</div>'}
+      </div>
+      </section>
+      </div>
     </div>
     <div class="dialog-foot"><button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Save</button></div>`,
   box => {
     const $b = sel => box.querySelector(sel);
+    box.classList.add('settings-dialog');
+    // Sidebar tabs: click, or arrow keys while a tab is focused.
+    const tabs = [...box.querySelectorAll('.settings-tab')];
+    const show = (name, focusTab = false) => {
+      tabs.forEach(t => {
+        const on = t.dataset.tab === name;
+        t.setAttribute('aria-selected', String(on));
+        t.tabIndex = on ? 0 : -1;
+        box.querySelector('#' + t.getAttribute('aria-controls')).hidden = !on;
+        if (on && focusTab) t.focus();
+      });
+      box.querySelector('.settings-panels').scrollTop = 0;
+      try { localStorage.setItem(TAB_KEY, name); } catch {}
+    };
+    tabs.forEach(t => {
+      t.onclick = () => show(t.dataset.tab);
+      t.onkeydown = e => {
+        const i = tabs.indexOf(t);
+        const j = { ArrowDown: i + 1, ArrowRight: i + 1, ArrowUp: i - 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+        if (j == null) return;
+        e.preventDefault();
+        show(tabs[(j + tabs.length) % tabs.length].dataset.tab, true);
+      };
+    });
     const removedGroups = new Set();
     const wireRule = el => {
       const pat = el.querySelector('.ai-rule-pat');
@@ -658,7 +699,7 @@ export async function openAiSettings({ focus, newRule, rulesFor: forUrl } = {}) 
       await refreshState();
       ctx.closeModal();
       ctx.render();
-      ctx.toast('AI settings saved');
+      ctx.toast('Settings saved');
     };
   });
 }
