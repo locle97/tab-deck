@@ -48,10 +48,10 @@ function fakes() {
     async prompt(text, opts = {}) {
       ai.calls.push({ system: this.o.initialPrompts?.[0]?.content || '', text, json: !!opts.responseConstraint });
       if (/write instructions for an AI that summarizes/.test(this.o.initialPrompts?.[0]?.content || '')) {
-        return 'Here you go:\n```\nThis page is: a test page.\nFacts: the secret phrase.\nSummary: say the secret phrase.\nStatus:\n- Needs you when the phrase is red.\n```';
+        return 'Here you go:\n```\nThis page is: a test page.\nFacts: the secret phrase.\nSummary: say the secret phrase.\nStatus:\n- Need review when the phrase is red.\n```';
       }
       if (opts.responseConstraint) {
-        const status = /PR rule/.test(text) ? 'action' : /purple-otter/.test(text) ? 'working' : 'info';
+        const status = /PR rule/.test(text) ? 'review' : /purple-otter/.test(text) ? 'working' : 'unknown';
         const what = /purple-otter/.test(text) ? 'mentions purple-otter' : 'no page text';
         return JSON.stringify({ summary: `Local summary ${what}. A second sentence that should be dropped.`, status });
       }
@@ -70,7 +70,7 @@ function fakes() {
       if (String(url).includes('/models?')) return new Response('{"models":[]}', { status: 200 });
       const ev = t => `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: t }] } }] })}\n\n`;
       const out = body.generationConfig?.responseMimeType === 'application/json'
-        ? ev('{"summary": "A cloud tab sentence from Gemini. Extra.", ') + ev('"status": "waiting"}')
+        ? ev('{"summary": "A cloud tab sentence from Gemini. Extra.", ') + ev('"status": "done"}')
         : ev('This group is about **cloud** testing. ') + ev('Extra sentence.');
       return new Response(out, { status: 200, headers: { 'content-type': 'text/event-stream' } });
     }
@@ -190,9 +190,9 @@ try {
   await page.waitForFunction(() => /local testing of tabs\.$/.test(document.querySelector('[data-sum^="group:"] .ai-gtext')?.textContent || ''));
   await waitLine(page, '/alpha', /^Local summary mentions purple-otter\.$/);
   await waitLine(page, '/pr/5', /mentions purple-otter/);
-  assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Needs you/);
+  assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Need review/);
   assert.match(await page.textContent('.tab:has-text("/alpha") .ai-st'), /In progress/);
-  assert.match(await page.textContent('.pane-meta'), /Needs you/);
+  assert.match(await page.textContent('.pane-meta'), /Need review/);
   const calls = await page.evaluate(() => window.__ai.calls);
   const prCall = calls.find(c => c.json && c.text.includes('/pr/5'));
   const alphaCall = calls.find(c => c.json && c.text.includes('/alpha'));
@@ -269,8 +269,8 @@ try {
   await page.click('[data-nav=dashboard]');
   await page.waitForSelector('.card:has-text("Research") .ai-gtext');
   assert.match(await page.textContent('.card-tab:has-text("/pr/5") .ai-line'), /mentions purple-otter/);
-  assert.equal(await page.locator('.card-tab:has-text("/pr/5") .ai-dot-btn.st-action').count(), 1);
-  assert.match(await page.textContent('.card:has-text("Research") .card-meta'), /Needs you/);
+  assert.equal(await page.locator('.card-tab:has-text("/pr/5") .ai-dot-btn.st-review').count(), 1);
+  assert.match(await page.textContent('.card:has-text("Research") .card-meta'), /Need review/);
   const order = () => page.$$eval('.card .card-name', ns => ns.map(n => n.textContent.trim()));
   assert.deepEqual((await order()).slice(0, 2), ['Other', 'Research']);
   await page.check('[data-act=urgent]');
@@ -311,7 +311,7 @@ try {
   await page.hover('.tab:has-text("/pr/5")');
   await page.click('.tab:has-text("/pr/5") [data-act=ai-tab]');
   await waitLine(page, '/pr/5', /^A cloud tab sentence from Gemini\.$/);
-  assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Waiting/);
+  assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Done/);
   f = await page.evaluate(() => window.__ai.fetches.at(-1));
   assert.equal(f.body.generationConfig.responseMimeType, 'application/json');
   assert.match(f.body.systemInstruction.parts[0].text, /^You look at one browser tab[\s\S]*in this order: \{"facts"[\s\S]*Instructions for this page:\nPR rule/);

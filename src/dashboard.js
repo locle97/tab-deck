@@ -320,7 +320,7 @@ function renderMain() {
 }
 
 /* ---------- dashboard ---------- */
-// "Most urgent first": order cards by the most urgent tab status in each group (Needs you first).
+// "Most urgent first": order cards by the most urgent tab status in each group (Need review first).
 const URGENT_KEY = 'tabdesk.urgentFirst';
 let urgentFirst = (() => { try { return localStorage.getItem(URGENT_KEY) === '1'; } catch { return false; } })();
 function sortByUrgency(groups) {

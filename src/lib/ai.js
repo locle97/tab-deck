@@ -8,7 +8,7 @@ import {
   isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
   baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   cacheKey, fnv, pruneCache, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
-  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
+  insightKey, groupKey, normalizeStatus, migrateStatuses, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
 } from './ai-core.js';
 
 const SETTINGS_KEY = 'aiSettings';
@@ -173,6 +173,7 @@ export async function loadInsights() {
     const r = await chrome.storage.local.get([INSIGHTS_KEY, GROUP_INSIGHTS_KEY]);
     insights = r[INSIGHTS_KEY] || {};
     groupInsights = r[GROUP_INSIGHTS_KEY] || {};
+    if (migrateStatuses(insights)) scheduleSave();
   }
   return { insights, groupInsights };
 }
@@ -486,7 +487,7 @@ export async function summarizeTab(tab, opts = {}) {
   }
   if (!r.summary) throw new AiError('The AI returned an empty summary.', 'empty');
   // A status set by hand was about the page as it was. The page has changed, so the new analysis wins:
-  // otherwise a stale "Needs you" sits next to a summary that says the PR is merged.
+  // otherwise a stale "Need review" sits next to a summary that says the PR is merged.
   const changed = prev && prev.textSig && prev.textSig !== fnv(page.text);
   return putInsight(page.url, {
     summary: r.summary, status: r.status, facts: r.facts || '', engine, sig, textSig: fnv(page.text),

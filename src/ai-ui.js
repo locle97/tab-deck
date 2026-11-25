@@ -1,11 +1,11 @@
 // AI summaries on the Tab Desk page: a one-sentence summary under every tab, a status for each tab
-// (Needs you, In progress, Waiting, Done, Reference) judged by the AI or set by hand, a one-sentence
+// (Need review, In progress, Done) judged by the AI or set by hand, a one-sentence
 // summary per group, AI settings, and custom instructions (general, per group, per URL pattern).
 // The engines live in lib/ai.js.
 
 import * as AI from './lib/ai.js';
 import {
-  groupKey, chooseEngine, DEFAULT_MODEL, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
+  groupKey, chooseEngine, DEFAULT_MODEL, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER, normalizeStatus,
   effectiveStatus, rollupStatus, needsInsight, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
@@ -245,7 +245,7 @@ function statusMenu(anchor, tabId) {
   const ins = AI.tabInsight(url);
   const cur = effectiveStatus(ins);
   ctx.openMenu(anchor, m => {
-    ctx.menuLabel(m, ins?.status && !ins.manual ? `Status · AI says ${STATUSES[ins.status].label}` : 'Status');
+    ctx.menuLabel(m, normalizeStatus(ins?.status) && !ins.manual ? `Status · AI says ${STATUSES[normalizeStatus(ins.status)].label}` : 'Status');
     STATUS_ORDER.forEach(s => ctx.menuItem(m,
       `<span class="ai-st st-${s} static"><i></i>${STATUSES[s].label}</span><span class="ai-menu-hint">${cur === s ? IC.check : ''}</span>`,
       () => AI.setManualStatus(url, s)));

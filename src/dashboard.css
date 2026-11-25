@@ -412,11 +412,9 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-st.manual { box-shadow: inset 0 0 0 1px var(--s); }
 .ai-st.st-none { color: var(--faint); background: transparent; border: 1px dashed var(--line); padding: 0 6px; opacity: 0; }
 .tab:hover .ai-st.st-none, .tab:focus-within .ai-st.st-none { opacity: 1; }
-.st-action { --s: var(--g-red); }
+.st-review { --s: var(--g-orange, var(--g-red)); }
 .st-working { --s: var(--g-blue); }
-.st-waiting { --s: var(--g-yellow); }
 .st-done { --s: var(--g-green); }
-.st-info { --s: var(--g-grey); }
 .st-none { --s: var(--faint); }
 .ai-dot-btn { width: 18px; height: 26px; flex: none; display: grid; place-items: center; padding: 0; border: 0; background: transparent; border-radius: 6px; }
 .ai-dot-btn i { width: 8px; height: 8px; border-radius: 50%; background: var(--s); box-shadow: 0 0 0 2px color-mix(in srgb, var(--s) 22%, transparent); }

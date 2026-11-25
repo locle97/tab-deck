@@ -147,26 +147,50 @@ export function suggestPattern(url) {
 /* ---------- status ---------- */
 
 export const STATUSES = {
-  action: { label: 'Needs you', hint: 'Waiting for you to do something: review, reply, approve, fix or finish.' },
-  working: { label: 'In progress', hint: 'Being worked on or running: a build, a draft, an agent, a checkout.' },
-  waiting: { label: 'Waiting', hint: 'Blocked on someone or something else.' },
+  review: { label: 'Need review', hint: 'Waiting for you: review, reply, approve, fix or decide.' },
+  working: { label: 'In progress', hint: 'Still going: being worked on, running, or waiting on others or CI.' },
   done: { label: 'Done', hint: 'Finished: merged, closed, resolved, sent, completed.' },
-  info: { label: 'Reference', hint: 'Something to read or look up. No task.' },
 };
-export const STATUS_ORDER = ['action', 'working', 'waiting', 'done', 'info'];
-export const normalizeStatus = s => (STATUS_ORDER.includes(s) ? s : null);
+export const STATUS_ORDER = ['review', 'working', 'done'];
+// Statuses saved before there were only three: Needs you → Need review, Waiting → In progress, Reference → none.
+const LEGACY_STATUS = { action: 'review', waiting: 'working', info: null, 'need review': 'review', 'needs review': 'review', 'in progress': 'working' };
+export const normalizeStatus = s => {
+  const k = typeof s === 'string' ? s.trim().toLowerCase() : s;
+  if (STATUS_ORDER.includes(k)) return k;
+  return LEGACY_STATUS[k] ?? null;
+};
 
 /** The most urgent status of a list (null when none is known). */
 export function rollupStatus(list) {
   let best = null;
-  for (const s of list) if (normalizeStatus(s) && (best == null || STATUS_ORDER.indexOf(s) < STATUS_ORDER.indexOf(best))) best = s;
+  for (const raw of list) {
+    const s = normalizeStatus(raw);
+    if (s && (best == null || STATUS_ORDER.indexOf(s) < STATUS_ORDER.indexOf(best))) best = s;
+  }
   return best;
 }
 
-/** Sort rank for "most urgent first": unknown sorts after Waiting, before Done. */
+/** Sort rank for "most urgent first": unknown sorts after In progress, before Done. */
 export function statusRank(s) {
-  const i = STATUS_ORDER.indexOf(s);
-  return i < 0 ? 2.5 : i;
+  const i = STATUS_ORDER.indexOf(normalizeStatus(s));
+  return i < 0 ? 1.5 : i;
+}
+
+/** Rewrites statuses saved before there were three (in place). Returns how many insights changed. */
+export function migrateStatuses(insights) {
+  let n = 0;
+  for (const ins of Object.values(insights || {})) {
+    if (!ins || typeof ins !== 'object') continue;
+    let changed = false;
+    for (const f of ['status', 'manual']) {
+      if (ins[f] == null || STATUS_ORDER.includes(ins[f])) continue;
+      const v = normalizeStatus(ins[f]);
+      if (v) ins[f] = v; else delete ins[f];
+      changed = true;
+    }
+    if (changed) n++;
+  }
+  return n;
 }
 
 /** The status to show: a status the person set by hand wins over the AI's. */
@@ -301,23 +325,20 @@ export const INSTRUCTION_TEMPLATE = `This page is: …
 Facts: …
 Summary: …
 Status:
-- Needs you when …
+- Need review when …
 - In progress when …
-- Waiting when …
-- Done when …
-- Reference when …`;
+- Done when …`;
 
 /** Used when no page rule, group or general instructions apply. Same shape as the template. */
 export const DEFAULT_TAB_INSTRUCTIONS = `This page is: any web page.
 Facts: the page's own current state in a few words, copied from what the page shows (for example "Merged", "Open · review requested from you", "Draft · 2 checks failing", "Order delivered"). Trust the "Page state:" line and the page's status areas over older comments or the description. Empty if the page has no state.
 Summary: what this page is and, if there is a task, where it stands.
 Status:
-- Needs you when you have to do something: review, reply, approve, fix or finish.
-- In progress when it is being worked on or running: a build, a draft, an agent.
-- Waiting when it is blocked on someone or something else.
+- Need review when you have to do something: review, reply, approve, fix or decide.
+- In progress when it is still going: being worked on, running, a draft, or waiting on others or CI.
 - Done when it is finished: merged, closed, resolved, sent, completed.
-- Reference when it is something to read or look up, with no task.
-A merged or closed pull request is Done; one waiting on your review or changes is Needs you; one waiting on others' review or CI is Waiting.`;
+Pages with no task (articles, docs, search results) get "unknown".
+A merged or closed pull request is Done; one waiting on your review or changes is Need review; any other open one is In progress.`;
 
 /** The fixed part of every tab prompt: the reply format. Detailed instructions go after it. */
 export function baseTabPrompt(lang = 'en') {
@@ -325,7 +346,7 @@ export function baseTabPrompt(lang = 'en') {
     `Reply with JSON only, in this order: {"facts": "...", "summary": "...", "status": "..."}.\n` +
     `"facts": the page's current state in a few words, copied from the page. Empty if it has none.\n` +
     `"summary": ONE short sentence (at most 25 words). No preamble, no Markdown. It must agree with "facts".\n` +
-    `"status": one of the values below. It must agree with "facts" and "summary".\n${STATUS_GUIDE}\n"unknown": none of these is clear.\n` +
+    `"status": one of the values below. It must agree with "facts" and "summary".\n${STATUS_GUIDE}\n"unknown": no task on this page, or none of these is clear.\n` +
     `Follow the instructions for this page on what to put in each field. ` +
     `Write "facts" and "summary" in the language with code "${lang}" unless those instructions ask otherwise. ${INJECTION_GUARD}`;
 }
