@@ -1,6 +1,7 @@
 import {
   COLORS, COLOR_NAMES, buildModel, allTabs, findDuplicates, duplicateCount, domainProposals,
   hostOf, shortUrl, siteName, plural, timeAgo, nextColor, score, savedLabel, groupMoveTarget, neighborMove,
+  cardTabs, groupFacts, lastUsed,
 } from './lib/model.js';
 import * as A from './lib/actions.js';
 import { listWorkspaces, onWorkspacesChanged } from './lib/workspaces.js';
@@ -13,11 +14,20 @@ const PAL_PLACEHOLDER = 'Search tabs, groups, workspaces. Type > for commands';
 let selfTab = null;
 let model = { groups: [], inbox: [], windowCount: 1, tabCount: 0 };
 let workspaces = [];
-let view = { kind: 'group', id: null };
+let view = { kind: 'dashboard' };
 let selected = new Set();
 let renaming = false;
 let deferred = false;
 let dragging = null; // id of the group being dragged in the sidebar
+const showAllTabs = new Set(); // dashboard cards opened up to list every tab
+const CARD_TABS = 8; // tabs listed on a dashboard card before "+ N more"
+
+// Which page Tab Desk opens on: the dashboard, or the group you last worked in.
+const HOME_KEY = 'tabdesk.home';
+function rememberHome(v) {
+  const home = v.kind === 'dashboard' ? 'dashboard' : v.kind === 'group' ? 'group' : null;
+  if (home) try { localStorage.setItem(HOME_KEY, home); } catch {}
+}
 
 // Sidebar groups opened to show their tabs. Remembered per browser; it is only a convenience.
 const EXPANDED_KEY = 'tabdesk.expandedGroups';
@@ -93,7 +103,7 @@ async function perform(fn) {
 }
 
 /* ---------- actions wired to UI ---------- */
-function setView(v) { view = v; selected.clear(); renaming = false; closeMenu(); render(); $('#main').scrollTop = 0; }
+function setView(v) { view = v; rememberHome(v); selected.clear(); renaming = false; closeMenu(); render(); $('#main').scrollTop = 0; }
 
 const doCloseTabs = ids => perform(async () => ({ msg: `Closed ${plural(ids.length, 'tab')}`, undo: await A.closeTabs(ids) }));
 
@@ -158,6 +168,8 @@ const ICON = {
   stack: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></svg>',
   bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3 4 14h7l-1 7 9-11h-7l1-7Z"/></svg>',
   chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
+  grid: '<svg class="grid-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
+  audio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>',
   go: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>',
 };
 
@@ -170,6 +182,7 @@ function renderSide() {
   const cur = (k, id) => String(view.kind === k && (id == null || view.id === id));
   const multiWin = model.windowCount > 1;
   let h = `<div class="nav-scroll"><div class="nav-items" style="padding-top:4px">
+    <button class="nav-item" data-nav="dashboard" aria-current="${cur('dashboard')}" type="button" title="Every open group on one page">${ICON.grid}<span class="name">Dashboard</span><span class="hot">Alt 0</span><span class="count">${model.groups.length}</span></button>
     <button class="nav-item" data-nav="inbox" aria-current="${cur('inbox')}" type="button">${ICON.inbox}<span class="name">Inbox</span><span class="count">${model.inbox.length}</span></button>
   </div></div>`;
   h += `<div class="nav-label"><span>Open groups</span><span>${model.groups.length}</span></div><div class="nav-scroll"><div class="nav-items">`;
@@ -245,6 +258,7 @@ function urlCounts() {
 
 function renderMain() {
   const counts = urlCounts();
+  if (view.kind === 'dashboard') { $('#main').innerHTML = renderDashboard(); return; }
   let h = '<div class="pane">';
   if (view.kind === 'group' && groupById(view.id)) {
     const g = groupById(view.id);
@@ -305,6 +319,75 @@ function renderMain() {
   if (renaming) { const i = $('#renameInput'); i.focus(); i.select(); }
 }
 
+/* ---------- dashboard ---------- */
+/**
+ * Extra content under a card's header, between the facts line and the tab list.
+ * Empty for now; a group summary (see docs/specs/ai-tab-summaries.md) can render here.
+ */
+function cardSummary(g) { return ''; }
+
+function cardTab(t) {
+  const url = t.url || t.pendingUrl || '';
+  const sleeping = t.discarded || t.frozen;
+  return `<li class="card-tab${t.active ? ' is-active' : ''}${sleeping ? ' is-sleeping' : ''}" data-id="${t.id}">
+    <button class="card-tab-btn" data-act="activate" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="t">${esc(titleOf(t))}</span>
+    ${t.audible ? `<span class="card-ico" title="Playing audio">${ICON.audio}</span>` : ''}${t.active ? '<span class="live" title="The visible tab in its window"></span>' : ''}</button>
+    <button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close ${esc(titleOf(t))}">${ICON.close}</button></li>`;
+}
+
+function cardTabList(key, tabs) {
+  const all = showAllTabs.has(key);
+  const { shown, hidden } = cardTabs(tabs, CARD_TABS, all);
+  let h = `<ul class="card-tabs">${shown.map(cardTab).join('')}</ul>`;
+  if (hidden) h += `<button class="card-toggle" data-act="card-all" type="button">+ ${plural(hidden, 'more tab')}</button>`;
+  else if (all && tabs.length > CARD_TABS + 1) h += `<button class="card-toggle" data-act="card-all" type="button">Show fewer</button>`;
+  return h;
+}
+
+function groupCard(g) {
+  const used = timeAgo(lastUsed(g.tabs));
+  const meta = [groupFacts(g.tabs)];
+  if (used) meta.push(used === 'now' ? 'used now' : `used ${used} ago`);
+  if (g.collapsed) meta.push('collapsed');
+  return `<article class="card" data-card="${g.id}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
+    <header class="card-head">
+      <button class="card-name" data-act="open" type="button" title="Show ${esc(g.name)} in detail">${esc(g.name)}</button>
+      ${model.windowCount > 1 ? `<span class="win-tag">W${g.window}</span>` : ''}
+      <button class="btn sm" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch</button>
+      <button class="icon-btn" data-act="card-more" type="button" title="More actions" aria-label="More actions for ${esc(g.name)}">${ICON.more}</button>
+    </header>
+    <div class="card-meta">${esc(meta.join(' · '))}</div>
+    ${cardSummary(g)}
+    ${cardTabList(g.id, g.tabs)}
+  </article>`;
+}
+
+function inboxCard() {
+  return `<article class="card inbox" data-card="inbox" aria-label="Inbox">
+    <header class="card-head">
+      <button class="card-name" data-act="open" type="button" title="Show the Inbox">${ICON.inbox} Inbox</button>
+    </header>
+    <div class="card-meta">${plural(model.inbox.length, 'tab')} not in any group</div>
+    ${cardTabList('inbox', model.inbox)}
+  </article>`;
+}
+
+function renderDashboard() {
+  const g = model.groups;
+  let h = `<div class="pane wide"><div class="pane-head"><div class="pane-title">
+      <div class="eyebrow"><span class="bar"></span>All open groups</div>
+      <h1>Dashboard</h1>
+      <div class="pane-meta">${plural(g.length, 'group')} · ${plural(model.tabCount, 'tab')}${model.windowCount > 1 ? ` · ${plural(model.windowCount, 'window')}` : ''}</div>
+    </div></div>`;
+  if (!g.length && !model.inbox.length) h += `<div class="empty"><strong>No open tabs</strong>Open some tabs and group them to see them here.</div>`;
+  else {
+    if (!g.length) h += `<div class="notice">No tab groups yet. Select tabs in the Inbox and move them to a new group.</div>`;
+    h += `<div class="cards">${g.map(groupCard).join('')}${model.inbox.length ? inboxCard() : ''}</div>`;
+  }
+  h += `<div class="hint-row"><span>Click a tab to switch to it</span><span>Click a group name for details</span><span><kbd>Alt 0</kbd> dashboard</span><span><kbd>${MOD} K</kbd> jump anywhere</span></div>`;
+  return h + '</div>';
+}
+
 /* ---------- menus ---------- */
 let menuEl = null;
 function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
@@ -334,6 +417,41 @@ function menuItem(m, html, run) {
   m.append(b);
 }
 function menuLabel(m, text) { const d = document.createElement('div'); d.className = 'menu-label'; d.textContent = text; m.append(d); }
+function colorSwatches(m, g) {
+  menuLabel(m, 'Group color');
+  const s = document.createElement('div');
+  s.className = 'swatches';
+  COLORS.forEach(c => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.style.setProperty('--c', cvar(c));
+    b.title = COLOR_NAMES[c];
+    b.setAttribute('aria-label', COLOR_NAMES[c]);
+    b.setAttribute('aria-pressed', String(c === g.color));
+    b.onclick = ev => { ev.stopPropagation(); perform(async () => ({ msg: `Changed “${esc(g.name)}” to ${c}`, undo: await A.setGroupColor(g, c) })); };
+    s.append(b);
+  });
+  m.append(s);
+}
+/** Actions for one group. `onCard` adds the ones the detail pane shows as buttons. */
+function groupMenu(m, g, onCard = false) {
+  if (onCard) {
+    menuItem(m, `${ICON.pen}<span>Open details</span>`, () => setView({ kind: 'group', id: g.id }));
+    menuItem(m, `${ICON.save}<span>Save &amp; close</span>`, () => doSaveClose(g));
+    m.append(document.createElement('hr'));
+  }
+  menuItem(m, '<span>Sort tabs by site</span>', () => perform(async () => ({ msg: 'Sorted tabs by site', undo: await A.sortGroupBySite(g) })));
+  menuItem(m, `<span>${g.collapsed ? 'Expand' : 'Collapse'} in tab strip</span>`, () => perform(() => A.setCollapsed(g, !g.collapsed)));
+  menuItem(m, '<span>Ungroup (move tabs to Inbox)</span>', () => perform(async () => {
+    const undo = await A.ungroupGroup(g);
+    if (!onCard) view = { kind: 'inbox' };
+    return { msg: `Ungrouped “${esc(g.name)}”`, undo };
+  }));
+  if (onCard) { m.append(document.createElement('hr')); colorSwatches(m, g); }
+  m.append(document.createElement('hr'));
+  menuItem(m, `<span style="color:var(--danger)">Close group and its ${plural(g.tabs.length, 'tab')}</span>`,
+    () => perform(async () => ({ msg: `Closed “${esc(g.name)}” and ${plural(g.tabs.length, 'tab')}`, undo: await A.closeTabs(g.tabs.map(t => t.id)) })));
+}
 function sourceGroupId(ids) { const x = tabById(ids[0]); return x?.owner ? x.owner.id : 'inbox'; }
 function moveMenu(anchor, ids) {
   const from = sourceGroupId(ids);
@@ -425,9 +543,9 @@ document.addEventListener('click', e => {
     return;
   }
   const act = e.target.closest('[data-act]');
-  const row = e.target.closest('.tab');
+  const row = e.target.closest('.tab, .card-tab');
   if (act) return handleAction(act, row, e);
-  if (row && !e.target.closest('input,button')) {
+  if (row?.classList.contains('tab') && !e.target.closest('input,button')) {
     const x = tabById(+row.dataset.id);
     if (x) perform(() => A.activateTab(x.t));
   }
@@ -436,7 +554,8 @@ document.addEventListener('click', e => {
 function handleAction(act, row, e) {
   const a = act.dataset.act;
   const tid = row ? +row.dataset.id : null;
-  const g = view.kind === 'group' ? groupById(view.id) : null;
+  const card = act.closest('[data-card]');
+  const g = card ? groupById(+card.dataset.card) : view.kind === 'group' ? groupById(view.id) : null;
   const ws = () => workspaces.find(w => w.id === act.closest('[data-wid]').dataset.wid);
   switch (a) {
     case 'select':
@@ -451,38 +570,16 @@ function handleAction(act, row, e) {
     case 'save-close': return doSaveClose(g);
     case 'focus': return doFocus(g);
     case 'rename': renaming = true; return renderMain();
-    case 'color':
-      e.stopPropagation();
-      return openMenu(act, m => {
-        menuLabel(m, 'Group color');
-        const s = document.createElement('div');
-        s.className = 'swatches';
-        COLORS.forEach(c => {
-          const b = document.createElement('button');
-          b.type = 'button';
-          b.style.setProperty('--c', cvar(c));
-          b.title = COLOR_NAMES[c];
-          b.setAttribute('aria-label', COLOR_NAMES[c]);
-          b.setAttribute('aria-pressed', String(c === g.color));
-          b.onclick = ev => { ev.stopPropagation(); perform(async () => ({ msg: `Changed “${esc(g.name)}” to ${c}`, undo: await A.setGroupColor(g, c) })); };
-          s.append(b);
-        });
-        m.append(s);
-      });
-    case 'group-more':
-      e.stopPropagation();
-      return openMenu(act, m => {
-        menuItem(m, '<span>Sort tabs by site</span>', () => perform(async () => ({ msg: 'Sorted tabs by site', undo: await A.sortGroupBySite(g) })));
-        menuItem(m, `<span>${g.collapsed ? 'Expand' : 'Collapse'} in tab strip</span>`, () => perform(() => A.setCollapsed(g, !g.collapsed)));
-        menuItem(m, '<span>Ungroup (move tabs to Inbox)</span>', () => perform(async () => {
-          const undo = await A.ungroupGroup(g);
-          view = { kind: 'inbox' };
-          return { msg: `Ungrouped “${esc(g.name)}”`, undo };
-        }));
-        m.append(document.createElement('hr'));
-        menuItem(m, `<span style="color:var(--danger)">Close group and its ${plural(g.tabs.length, 'tab')}</span>`,
-          () => perform(async () => ({ msg: `Closed “${esc(g.name)}” and ${plural(g.tabs.length, 'tab')}`, undo: await A.closeTabs(g.tabs.map(t => t.id)) })));
-      });
+    case 'color': e.stopPropagation(); return openMenu(act, m => colorSwatches(m, g));
+    case 'group-more': e.stopPropagation(); return openMenu(act, m => groupMenu(m, g));
+    case 'card-more': e.stopPropagation(); return openMenu(act, m => groupMenu(m, g, true));
+    case 'card-all': {
+      const key = card.dataset.card === 'inbox' ? 'inbox' : +card.dataset.card;
+      showAllTabs.has(key) ? showAllTabs.delete(key) : showAllTabs.add(key);
+      return renderMain();
+    }
+    case 'open': return setView(g ? { kind: 'group', id: g.id } : { kind: 'inbox' });
+    case 'activate': { const x = tabById(tid); if (x) perform(() => A.activateTab(x.t)); return; }
     case 'by-domain': return openByDomain();
     case 'restore': return doRestore(ws());
     case 'ws-delete': {
@@ -511,6 +608,7 @@ document.addEventListener('keydown', e => {
     if (m) doMoveGroup(+gEl.dataset.gid, m.targetId, m.place, true);
     return;
   }
+  if (e.altKey && !mod && e.code === 'Digit0' && $('#pal').hidden) { e.preventDefault(); setView({ kind: 'dashboard' }); return; }
   if (e.altKey && /^Digit[1-9]$/.test(e.code) && $('#pal').hidden) {
     const g = model.groups[+e.code.slice(5) - 1];
     if (g) { e.preventDefault(); setView({ kind: 'group', id: g.id }); }
@@ -605,6 +703,7 @@ function commands() {
   if (dc) c.push({ type: 'cmd', label: 'Close duplicate tabs', sub: `${plural(dc, 'extra tab')} open`, ico: ICON.copy, run: openDuplicates });
   const dp = domainProposals(model.inbox).length;
   if (dp) c.push({ type: 'cmd', label: 'Group Inbox tabs by site', sub: `${plural(dp, 'group')} suggested`, ico: ICON.sparkle, run: () => { setView({ kind: 'inbox' }); openByDomain(); } });
+  c.push({ type: 'cmd', label: 'Show dashboard', sub: `All ${plural(model.groups.length, 'open group')} on one page`, ico: ICON.grid.replace('class="grid-ico"', ''), run: () => setView({ kind: 'dashboard' }) });
   c.push({ type: 'cmd', label: 'Go to Inbox', sub: plural(model.inbox.length, 'ungrouped tab'), ico: ICON.inbox.replace('class="inbox-ico"', ''), run: () => setView({ kind: 'inbox' }) });
   c.push({ type: 'cmd', label: 'Show workspaces', sub: `${workspaces.length} saved`, ico: ICON.stack, run: () => setView({ kind: 'workspaces' }) });
   c.push({ type: 'cmd', label: cur ? 'Sleep tabs outside this group' : 'Sleep inactive tabs', sub: 'Free memory. Tabs stay open and reload when opened.', ico: ICON.bolt,
@@ -745,9 +844,13 @@ async function start() {
   selfTab = await chrome.tabs.getCurrent();
   workspaces = await listWorkspaces();
   await refresh();
-  // Open on the group you were just working in.
+  // Open on the dashboard, or on the group you were just working in if you
+  // left Tab Desk on a group's detail page last time.
+  let home = 'dashboard';
+  try { home = localStorage.getItem(HOME_KEY) || home; } catch {}
   const recent = allTabs(model).filter(x => x.owner).sort((a, b) => (b.t.lastAccessed || 0) - (a.t.lastAccessed || 0))[0];
-  if (recent) setView({ kind: 'group', id: recent.owner.id });
+  if (home === 'group' && recent) setView({ kind: 'group', id: recent.owner.id });
+  else setView({ kind: 'dashboard' });
   if (location.hash === '#palette') {
     history.replaceState(null, '', location.pathname);
     openPalette();
