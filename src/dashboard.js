@@ -1,12 +1,12 @@
 import {
   COLORS, COLOR_NAMES, buildModel, allTabs, findDuplicates, duplicateCount, domainProposals,
   hostOf, shortUrl, siteName, plural, timeAgo, nextColor, score, savedLabel, groupMoveTarget, neighborMove,
-  cardTabs, groupFacts, lastUsed,
+  cardTabs, groupFacts, lastUsed, sortGroups, sortTabsBy, dashboardSections, countBy, statusSegments,
 } from './lib/model.js';
 import * as A from './lib/actions.js';
 import { listWorkspaces, onWorkspacesChanged } from './lib/workspaces.js';
 import * as AIUI from './ai-ui.js';
-import { statusRank } from './lib/ai-core.js';
+import { statusRank, STATUSES, STATUS_ORDER } from './lib/ai-core.js';
 
 const SELF_URL = chrome.runtime.getURL('dashboard.html');
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
@@ -22,7 +22,6 @@ let renaming = false;
 let deferred = false;
 let dragging = null; // id of the group being dragged in the sidebar
 const showAllTabs = new Set(); // dashboard cards opened up to list every tab
-const CARD_TABS = 8; // tabs listed on a dashboard card before "+ N more"
 
 
 // Sidebar groups opened to show their tabs. Remembered per browser; it is only a convenience.
@@ -167,6 +166,11 @@ const ICON = {
   chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
   grid: '<svg class="grid-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
   audio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>',
+  sort: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M3 16l4 4 4-4M17 20V4M13 8l4-4 4 4"/></svg>',
+  cols: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg>',
+  rows: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6.5" rx="1.5"/><rect x="3" y="13.5" width="18" height="6.5" rx="1.5"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
   go: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>',
 };
 
@@ -320,78 +324,176 @@ function renderMain() {
 }
 
 /* ---------- dashboard ---------- */
-// "Most urgent first": order cards by the most urgent tab status in each group (Needs you first).
-const URGENT_KEY = 'tabdesk.urgentFirst';
-let urgentFirst = (() => { try { return localStorage.getItem(URGENT_KEY) === '1'; } catch { return false; } })();
-function sortByUrgency(groups) {
-  return groups.map((g, i) => ({ g, i, r: statusRank(AIUI.groupStatus(g)) })).sort((a, b) => a.r - b.r || a.i - b.i).map(x => x.g);
-}
+// Header: status filter chips on the left; sort, grid/list, Summarize all and search on the right.
+// Cards: a tinted header with the name and one status pill, a status bar, the summary as one muted
+// line, the top tabs with their status as a colored left edge, and a tiny footer with the facts.
+// Groups that need you sort first; Done groups fold into a row at the bottom; the Inbox is a slim row.
+// Statuses come from AIUI (tabStatusOf / groupStatus), so this code doesn't care how they're worked out.
+const DASH_KEY = 'tabdesk.dashboard';
+const SORTS = { urgent: 'Most urgent', recent: 'Recently used', manual: 'Tab strip order' };
+const dash = (() => {
+  const d = { sort: 'urgent', view: 'grid', doneOpen: false };
+  try {
+    Object.assign(d, JSON.parse(localStorage.getItem(DASH_KEY)) || {});
+    localStorage.removeItem('tabdesk.urgentFirst'); // replaced by the sort menu
+  } catch {}
+  if (!SORTS[d.sort]) d.sort = 'urgent';
+  if (d.view !== 'list') d.view = 'grid';
+  return d;
+})();
+function saveDash() { try { localStorage.setItem(DASH_KEY, JSON.stringify(dash)); } catch {} }
+let statusFilter = null; // show only groups with this status (not remembered)
+let dashSig = '';        // statuses the dashboard was last drawn with
+const CARD_TABS = { grid: 3, list: 6 }; // tabs on a collapsed card before "+ N more"
 
-/** The group's AI summary (or its instructions chip), between the facts line and the tab list. */
-const cardSummary = g => AIUI.groupSumCard(g);
+const tabSt = t => AIUI.tabStatusOf(t);
+const groupSt = g => (AIUI.aiEnabled() ? AIUI.groupStatus(g) : null);
+const sortMode = () => (dash.sort === 'urgent' && !AIUI.aiEnabled() ? 'manual' : dash.sort);
+/** A fingerprint of every tab's status: when it changes the cards re-sort and re-fold. */
+const statusSig = () => (AIUI.aiEnabled() ? `${AIUI.anyGroupRunning()}|` + allTabs(model).map(x => `${x.t.id}:${tabSt(x.t) || ''}`).join(',') : '');
+/** After AI paints new statuses in place, redraw the dashboard if order, filters or folding changed. */
+function onAiPainted() { if (view.kind === 'dashboard' && !renaming && statusSig() !== dashSig) renderMain(); }
 
 function cardTab(t) {
   const url = t.url || t.pendingUrl || '';
   const sleeping = t.discarded || t.frozen;
+  const site = siteName(url);
+  const tip = `${titleOf(t)}\n${shortUrl(url)}${sleeping ? '\nSleeping: reloads when you open it' : ''}`;
   return `<li class="card-tab${t.active ? ' is-active' : ''}${sleeping ? ' is-sleeping' : ''}" data-id="${t.id}">
-    ${AIUI.tabStatus(t, { compact: true })}<button class="card-tab-btn" data-act="activate" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="card-tab-text"><span class="t">${esc(titleOf(t))}</span>${AIUI.tabLine(t)}</span>
+    ${AIUI.tabStatus(t, { edge: true })}<button class="card-tab-btn" data-act="activate" type="button" title="${esc(tip)}">${fav(url)}<span class="card-tab-text"><span class="card-tab-line"><span class="t">${esc(titleOf(t))}</span>${site ? `<span class="dom">${esc(site)}</span>` : ''}</span>${AIUI.tabLine(t)}</span>
     ${t.audible ? `<span class="card-ico" title="Playing audio">${ICON.audio}</span>` : ''}${t.active ? '<span class="live" title="The visible tab in its window"></span>' : ''}</button>
-    ${AIUI.tabSumButton(t)}<button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close ${esc(titleOf(t))}">${ICON.close}</button></li>`;
+    <span class="card-tab-acts">${AIUI.tabSumButton(t)}<button class="icon-btn" data-act="move" type="button" title="Move to group" aria-label="Move ${esc(titleOf(t))} to group">${ICON.move}</button><button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close ${esc(titleOf(t))}">${ICON.close}</button></span></li>`;
 }
 
 function cardTabList(key, tabs) {
   const all = showAllTabs.has(key);
-  const { shown, hidden } = cardTabs(tabs, CARD_TABS, all);
+  const limit = CARD_TABS[dash.view];
+  const ordered = sortMode() === 'urgent' ? sortTabsBy(tabs, t => statusRank(tabSt(t))) : tabs;
+  const { shown, hidden } = cardTabs(ordered, limit, all);
   let h = `<ul class="card-tabs">${shown.map(cardTab).join('')}</ul>`;
-  if (hidden) h += `<button class="card-toggle" data-act="card-all" type="button">+ ${plural(hidden, 'more tab')}</button>`;
-  else if (all && tabs.length > CARD_TABS + 1) h += `<button class="card-toggle" data-act="card-all" type="button">Show fewer</button>`;
+  if (hidden) h += `<button class="card-toggle" data-act="card-all" type="button" aria-expanded="false">${ICON.chev}${plural(hidden, 'more tab')}</button>`;
+  else if (all && tabs.length > limit + 1) h += `<button class="card-toggle open" data-act="card-all" type="button" aria-expanded="true">${ICON.chev}Show fewer</button>`;
   return h;
 }
 
+/** Thin bar under the card header: one segment per status, sized by its number of tabs. */
+function statusBar(g) {
+  if (!AIUI.aiEnabled()) return '';
+  const segs = statusSegments(g.tabs, tabSt, STATUS_ORDER);
+  if (!segs.some(x => x.status !== 'none')) return '';
+  const label = segs.map(x => `${x.n} ${x.status === 'none' ? 'no status' : STATUSES[x.status].label}`).join(' · ');
+  return `<div class="st-bar" role="img" aria-label="${esc(label)}" title="${esc(label)}">${segs.map(x => `<i class="st-${x.status}" style="flex:${x.n}"></i>`).join('')}</div>`;
+}
+
 function groupCard(g) {
+  const s = groupSt(g);
   const used = timeAgo(lastUsed(g.tabs));
   const meta = [groupFacts(g.tabs)];
   if (used) meta.push(used === 'now' ? 'used now' : `used ${used} ago`);
   if (g.collapsed) meta.push('collapsed');
-  return `<article class="card" data-card="${g.id}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
+  const done = AIUI.aiEnabled() ? g.tabs.filter(t => tabSt(t) === 'done').length : 0;
+  const cls = ['card', s === 'action' && 'needs-you', s === 'done' && 'is-done'].filter(Boolean).join(' ');
+  return `<article class="${cls}" data-card="${g.id}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
     <header class="card-head">
-      <button class="card-name" data-act="open" type="button" title="Show ${esc(g.name)} in detail">${esc(g.name)}</button>
+      <button class="card-name" data-act="open" type="button" title="Show ${esc(g.name)} in detail">${esc(g.name)}</button>${AIUI.groupStatusBadge(g)}
       ${model.windowCount > 1 ? `<span class="win-tag">W${g.window}</span>` : ''}
-      ${AIUI.cardSumButton()}
-      <button class="btn sm" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch</button>
-      <button class="icon-btn" data-act="card-more" type="button" title="More actions" aria-label="More actions for ${esc(g.name)}">${ICON.more}</button>
+      <span class="card-tools">
+        <button class="btn sm" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch</button>
+        <button class="icon-btn" data-act="card-more" type="button" title="More actions" aria-label="More actions for ${esc(g.name)}">${ICON.more}</button>
+      </span>
     </header>
-    <div class="card-meta">${esc(meta.join(' · '))}${AIUI.groupStatusBadge(g)}</div>
-    ${cardSummary(g)}
-    ${cardTabList(g.id, g.tabs)}
+    ${statusBar(g)}
+    <div class="card-body">
+      ${AIUI.groupSumCard(g)}
+      ${cardTabList(g.id, g.tabs)}
+    </div>
+    <footer class="card-meta"><span>${esc(meta.join(' · '))}</span>${done ? `<span class="card-prog">${done} of ${g.tabs.length} done</span>` : ''}</footer>
   </article>`;
 }
 
-function inboxCard() {
-  return `<article class="card inbox" data-card="inbox" aria-label="Inbox">
-    <header class="card-head">
-      <button class="card-name" data-act="open" type="button" title="Show the Inbox">${ICON.inbox} Inbox</button>
-    </header>
-    <div class="card-meta">${plural(model.inbox.length, 'tab')} not in any group</div>
-    ${cardTabList('inbox', model.inbox)}
-  </article>`;
+/** Ungrouped tabs as one slim row under the cards. */
+function inboxRow() {
+  const n = model.inbox.length;
+  const shown = model.inbox.slice(0, 6);
+  return `<section class="inbox-row" data-card="inbox" aria-label="Inbox">
+    <button class="inbox-open" data-act="open" type="button" title="Show the Inbox">${ICON.inbox}<span>Inbox</span><span class="count">${n}</span></button>
+    <ul class="inbox-tabs">${shown.map(t => {
+      const url = t.url || t.pendingUrl || '';
+      return `<li class="inbox-tab" data-id="${t.id}"><button data-act="activate" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="t">${esc(titleOf(t))}</span></button></li>`;
+    }).join('')}</ul>
+    ${n > shown.length ? `<button class="link inbox-more" data-act="open" type="button">+ ${n - shown.length} more</button>` : ''}
+  </section>`;
+}
+
+function doneRow(done) {
+  const open = dash.doneOpen;
+  return `<section class="done-sec">
+    <button class="done-row" data-act="done-toggle" type="button" aria-expanded="${open}">
+      ${ICON.chev}<span class="ai-st st-done static"><i></i>Done</span>
+      <span class="done-names">${done.map(g => `<span class="done-name" style="--c:${cvar(g.color)}"><span class="dot"></span>${esc(g.name)}</span>`).join('')}</span>
+      <span class="done-count">${plural(done.length, 'group')}</span>
+    </button>
+    ${open ? `<div class="cards">${done.map(groupCard).join('')}</div>` : ''}
+  </section>`;
+}
+
+function dashBar(counts) {
+  const ai = AIUI.aiEnabled();
+  const total = model.groups.length;
+  let left;
+  if (ai && total && (STATUS_ORDER.some(st => counts[st]) || statusFilter)) {
+    const chip = (st, label, n) => `<button class="chip${st ? ` st-${st}` : ''}" data-act="filter" data-st="${st}" type="button" aria-pressed="${(statusFilter || '') === st}">${st ? '<i></i>' : ''}${label}<b>${n}</b></button>`;
+    left = chip('', 'All', total) + STATUS_ORDER.filter(st => counts[st] || statusFilter === st).map(st => chip(st, STATUSES[st].label, counts[st] || 0)).join('');
+  } else {
+    left = `<span class="dash-count">${plural(total, 'group')} · ${plural(model.tabCount, 'tab')}${model.windowCount > 1 ? ` · ${plural(model.windowCount, 'window')}` : ''}</span>`;
+  }
+  const running = AIUI.anyGroupRunning();
+  return `<div class="dash-bar">
+    <h1 class="sr-only">Dashboard</h1>
+    <div class="dash-chips" role="group" aria-label="Filter groups by status">${left}</div>
+    <div class="dash-tools">
+      <button class="btn sm ghost" data-act="sort" type="button" aria-haspopup="menu" title="Sort groups">${ICON.sort}<span>${SORTS[sortMode()]}</span></button>
+      <span class="seg" role="group" aria-label="Layout">
+        <button class="icon-btn" data-act="view" data-v="grid" type="button" aria-pressed="${dash.view === 'grid'}" title="Grid" aria-label="Grid">${ICON.cols}</button>
+        <button class="icon-btn" data-act="view" data-v="list" type="button" aria-pressed="${dash.view === 'list'}" title="List" aria-label="List">${ICON.rows}</button>
+      </span>
+      ${ai && total ? `<button class="btn sm" data-act="sum-all" type="button" ${running ? 'disabled' : ''} title="Summarize every group and its tabs">${AIUI.sparkIcon()}<span>Summarize all</span></button>` : ''}
+      <button class="btn sm dash-search" data-act="search" type="button" title="Jump to a tab or group">${ICON.search}<span>Search</span><kbd>${MOD} K</kbd></button>
+    </div>
+  </div>`;
 }
 
 function renderDashboard() {
-  const urgent = AIUI.aiEnabled() && urgentFirst;
-  const g = urgent ? sortByUrgency(model.groups) : model.groups;
-  let h = `<div class="pane wide"><div class="pane-head"><div class="pane-title">
-      <div class="eyebrow"><span class="bar"></span>All open groups</div>
-      <h1>Dashboard</h1>
-      <div class="pane-meta">${plural(g.length, 'group')} · ${plural(model.tabCount, 'tab')}${model.windowCount > 1 ? ` · ${plural(model.windowCount, 'window')}` : ''}</div>
-    </div>${AIUI.aiEnabled() ? `<div class="actions"><label class="urgent-toggle" title="Groups with tabs that need you come first"><input type="checkbox" data-act="urgent" ${urgent ? 'checked' : ''}> Most urgent first</label></div>` : ''}</div>`;
-  if (!g.length && !model.inbox.length) h += `<div class="empty"><strong>No open tabs</strong>Open some tabs and group them to see them here.</div>`;
+  const ai = AIUI.aiEnabled();
+  dashSig = statusSig();
+  if (!ai) statusFilter = null;
+  const sorted = sortGroups(model.groups, sortMode(), g => statusRank(groupSt(g)));
+  const counts = ai ? countBy(model.groups, groupSt) : {};
+  const { main, done } = dashboardSections(sorted, groupSt, { filter: statusFilter, foldDone: ai });
+  let h = `<div class="pane wide dash${dash.view === 'list' ? ' is-list' : ''}">${dashBar(counts)}`;
+  if (!model.groups.length && !model.inbox.length) h += `<div class="empty"><strong>No open tabs</strong>Open some tabs and group them to see them here.</div>`;
   else {
-    if (!g.length) h += `<div class="notice">No tab groups yet. Select tabs in the Inbox and move them to a new group.</div>`;
-    h += `<div class="cards">${g.map(groupCard).join('')}${model.inbox.length ? inboxCard() : ''}</div>`;
+    if (!model.groups.length) h += `<div class="notice">No tab groups yet. Select tabs in the Inbox and move them to a new group.</div>`;
+    else if (statusFilter && !main.length) h += `<div class="notice">No groups are “${esc(STATUSES[statusFilter].label)}” right now. <button class="link" data-act="filter" data-st="" type="button">Show all</button></div>`;
+    if (main.length) h += `<div class="cards">${main.map(groupCard).join('')}</div>`;
+    if (done.length) h += doneRow(done);
+    if (model.inbox.length && !statusFilter) h += inboxRow();
   }
-  h += `<div class="hint-row"><span>Click a tab to switch to it</span><span>Click a group name for details</span><span><kbd>Alt 0</kbd> dashboard</span><span><kbd>${MOD} K</kbd> jump anywhere</span></div>`;
+  h += `<div class="hint-row"><span>Click a tab to switch to it</span><span>Click a group name for details</span><span><kbd>Alt 0</kbd> dashboard</span></div>`;
   return h + '</div>';
+}
+
+function sortMenu(anchor) {
+  openMenu(anchor, m => {
+    menuLabel(m, 'Sort groups');
+    Object.entries(SORTS).forEach(([k, label]) => {
+      if (k === 'urgent' && !AIUI.aiEnabled()) return;
+      const hint = { urgent: 'Needs you first', recent: 'Last used first', manual: 'As in the tab strip' }[k];
+      menuItem(m, `<span style="flex:1">${label}<span class="menu-sub">${hint}</span></span><span class="menu-check">${sortMode() === k ? ICON.check : ''}</span>`, () => {
+        dash.sort = k; saveDash(); renderMain();
+      });
+    });
+  });
 }
 
 /* ---------- menus ---------- */
@@ -442,6 +544,7 @@ function colorSwatches(m, g) {
 /** Actions for one group. `onCard` adds the ones the detail pane shows as buttons. */
 function groupMenu(m, g, onCard = false) {
   if (onCard) {
+    if (AIUI.aiEnabled()) menuItem(m, `${AIUI.sparkIcon()}<span>Summarize group and tabs</span>`, () => AIUI.summarizeGroup(g));
     menuItem(m, `${ICON.pen}<span>Open details</span>`, () => setView({ kind: 'group', id: g.id }));
     menuItem(m, `${ICON.save}<span>Save &amp; close</span>`, () => doSaveClose(g));
     m.append(document.createElement('hr'));
@@ -551,7 +654,7 @@ document.addEventListener('click', e => {
     return;
   }
   const act = e.target.closest('[data-act]');
-  const row = e.target.closest('.tab, .card-tab');
+  const row = e.target.closest('.tab, .card-tab, .inbox-tab');
   if (act) return handleAction(act, row, e);
   if (row?.classList.contains('tab') && !e.target.closest('input,button')) {
     const x = tabById(+row.dataset.id);
@@ -581,10 +684,12 @@ function handleAction(act, row, e) {
     case 'color': e.stopPropagation(); return openMenu(act, m => colorSwatches(m, g));
     case 'group-more': e.stopPropagation(); return openMenu(act, m => groupMenu(m, g));
     case 'card-more': e.stopPropagation(); return openMenu(act, m => groupMenu(m, g, true));
-    case 'urgent':
-      urgentFirst = act.checked;
-      try { localStorage.setItem(URGENT_KEY, urgentFirst ? '1' : '0'); } catch {}
-      return renderMain();
+    case 'filter': statusFilter = act.dataset.st || null; return renderMain();
+    case 'sort': e.stopPropagation(); return sortMenu(act);
+    case 'view': dash.view = act.dataset.v; saveDash(); return renderMain();
+    case 'done-toggle': dash.doneOpen = !dash.doneOpen; saveDash(); renderMain(); return document.querySelector('.done-row')?.focus();
+    case 'sum-all': return AIUI.summarizeAll(model.groups.map(x => x.id));
+    case 'search': return openPalette();
     case 'card-all': {
       const key = card.dataset.card === 'inbox' ? 'inbox' : +card.dataset.card;
       showAllTabs.has(key) ? showAllTabs.delete(key) : showAllTabs.add(key);
@@ -859,7 +964,7 @@ async function start() {
   $('#kbdHint').textContent = `${MOD} K`;
   selfTab = await chrome.tabs.getCurrent();
   workspaces = await listWorkspaces();
-  await AIUI.initAi({ esc, toast, openModal, closeModal, render: () => render(), renderMain: () => renderMain(), tabById, groupById, openMenu, menuItem, menuLabel, allTabs: () => allTabs(model) })
+  await AIUI.initAi({ esc, toast, openModal, closeModal, render: () => render(), renderMain: () => renderMain(), tabById, groupById, openMenu, menuItem, menuLabel, allTabs: () => allTabs(model), onPainted: onAiPainted })
     .catch(e => console.error('AI summaries failed to start', e));
   await refresh();
   // Tab Desk always opens on the dashboard.
