@@ -444,6 +444,8 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-check, .ai-radio { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; cursor: pointer; }
 .ai-check input, .ai-radio input { margin: 3px 0 0; accent-color: var(--focus); }
 .ai-indent { margin: -2px 0 6px 24px; }
+.ai-field .ai-check input { width: auto; flex: none; padding: 0; border: 0; border-radius: 0; background: none; }
+.ai-field .ai-check input:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
 .ai-radio > span { display: grid; }
 .ai-radio > span > span { font-size: 12.5px; color: var(--muted); }
 .ai-status-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin: 8px 0; }
@@ -543,6 +545,21 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-prompt-peek summary { cursor: pointer; color: var(--focus); }
 .ai-prompt-peek pre { white-space: pre-wrap; font-family: var(--font-mono); font-size: 11.5px; line-height: 1.45; background: var(--surface-2, var(--surface)); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 4px 0 10px; max-height: 220px; overflow: auto; }
 
+/* Page fields and status rules on a page rule */
+.ai-fields { border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 4px; display: grid; gap: 4px; }
+.ai-fields[open] { gap: 6px; }
+.ai-fields > summary { cursor: pointer; padding: 2px; color: var(--ink); }
+.ai-fields > p { margin: 0; }
+.ai-rule textarea.mono { font-family: var(--font-mono); font-size: 12px; }
+.ai-preset { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.ai-fields-out:empty { display: none; }
+.ai-fields-out { display: grid; gap: 4px; }
+.ai-fields-tbl { border-collapse: collapse; width: 100%; table-layout: fixed; }
+.ai-fields-tbl th, .ai-fields-tbl td { text-align: left; vertical-align: top; padding: 2px 6px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.ai-fields-tbl th { width: 28%; font-family: var(--font-mono); font-weight: 500; color: var(--muted); }
+.ai-fields .ai-rule-actions label { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.ai-fields .ai-rule-actions .ai-preset { width: auto; }
+
 /* Group summary on a dashboard card: one muted line, no box. Click it to read it all. */
 .ai-gline { display: flex; align-items: flex-start; gap: 6px; min-width: 0; padding: 0 2px 4px 6px; }
 .ai-gline .ai-gtext { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 400; line-height: 1.45; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; padding-top: 3px; }
@@ -556,3 +573,14 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-gline .icon-btn svg { width: 13px; height: 13px; }
 .ai-gline .link { font-size: 12px; padding-top: 3px; }
 .ai-gline-wrap:empty { display: none; }
+
+/* (i) buttons that show a hidden help text */
+.ai-info { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; margin-left: 2px; border: 0; border-radius: 50%; background: none; color: var(--muted); cursor: pointer; vertical-align: -4px; }
+.ai-info svg { width: 15px; height: 15px; }
+.ai-info:hover, .ai-info[aria-expanded="true"] { color: var(--ink); background: var(--surface-2); }
+.ai-info:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.ai-hint { margin: 2px 0 6px; line-height: 1.5; }
+.ai-hint p { margin: 0; }
+.ai-label-row { display: flex; align-items: center; gap: 2px; }
+.ai-label-row .ai-check { margin: 6px 0; }
+.ai-label-row .ai-info { vertical-align: 0; }

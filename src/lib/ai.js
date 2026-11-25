@@ -9,7 +9,9 @@ import {
   baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   cacheKey, fnv, pruneCache, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
   insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
+  sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES,
 } from './ai-core.js';
+import { fieldPlanFor, decideStatus, foundAny, factsLine, fieldsBlock } from './fields.js';
 
 const SETTINGS_KEY = 'aiSettings';
 const API_KEY = 'aiGeminiKey';
@@ -137,10 +139,63 @@ function extractInPage() {
   return { title: document.title, lang: document.documentElement.lang || '', desc, states, text: text.slice(0, 120000) };
 }
 
+// Runs inside the page. Must be self-contained. Reads the page fields of a rule (see fields.js) from the
+// live page, so text needs no clean-up: innerText of a live element is what the person sees.
+function extractFieldsInPage(fields) {
+  const MAXV = 200, MAXL = 20;
+  const clean = s => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, MAXV);
+  const textOf = el => clean(el.innerText ?? el.textContent);
+  const visible = el => !!(el.offsetParent || el.getClientRects?.().length) || el.tagName === 'META' || el.tagName === 'LINK';
+  const byLabel = label => {
+    const want = label.trim().toLowerCase().replace(/:$/, '');
+    const out = [];
+    const all = document.querySelectorAll('dt, th, label, span, div, p, strong, b, h1, h2, h3, h4, h5, h6, td, li');
+    for (const el of all) {
+      if (el.childElementCount > 2) continue;
+      const own = clean(el.textContent).toLowerCase().replace(/:$/, '');
+      if (own !== want || !visible(el)) continue;
+      // The value is the next element (a <dd>, the next cell, the next span), else the rest of the parent's text.
+      let v = '';
+      let sib = el.nextElementSibling;
+      while (sib && !v) { v = textOf(sib); sib = sib.nextElementSibling; }
+      if (!v && el.parentElement) {
+        const whole = textOf(el.parentElement);
+        v = clean(whole.slice(whole.toLowerCase().indexOf(want) + want.length).replace(/^\s*:?\s*/, ''));
+      }
+      if (v) out.push(v);
+      if (out.length >= MAXL) break;
+    }
+    return out;
+  };
+  const values = {};
+  for (const f of fields || []) {
+    let found = [];
+    try {
+      if (f.kind === 'label') found = byLabel(f.label);
+      else {
+        for (const el of document.querySelectorAll(f.selector)) {
+          if (!f.attr && !visible(el)) continue;
+          const v = f.attr ? clean(el.getAttribute(f.attr)) : textOf(el);
+          if (v && !found.includes(v)) found.push(v);
+          if (found.length >= (f.list ? MAXL : 1)) break;
+        }
+      }
+    } catch {}
+    values[f.name] = f.list ? found : (found[0] || '');
+  }
+  return values;
+}
+
+/** Read a rule's page fields from an open tab, for the "Test" button in Settings. */
+export async function readFields(tab, fields) {
+  const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: extractFieldsInPage, args: [fields] });
+  return { title: tab.title || '', url: tab.url || '', ...(res?.result || {}) };
+}
+
 /**
  * Read a tab's text. Never reloads sleeping tabs. Returns {title, url, lang, text, readable, reason}.
  */
-export async function extractTab(tab, { access }) {
+export async function extractTab(tab, { access, fields = null }) {
   const url = tab.url || tab.pendingUrl || '';
   const base = { title: tab.title || url, url, lang: '', text: '', readable: false, reason: '' };
   if (tab.incognito) return { ...base, reason: 'incognito' };
@@ -153,7 +208,14 @@ export async function extractTab(tab, { access }) {
     if (!r) return { ...base, reason: 'failed' };
     const states = Array.isArray(r.states) && r.states.length ? `Page state: ${r.states.join(' · ')}` : '';
     const text = cleanText([states, r.desc, r.text].filter(Boolean).join('\n\n')).slice(0, 100000);
-    return { ...base, title: r.title || base.title, lang: langCode(r.lang), text, readable: text.length > 0, reason: text ? '' : 'empty' };
+    let values = null;
+    if (fields?.length) {
+      try {
+        const [fr] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: extractFieldsInPage, args: [fields] });
+        values = fr?.result || null;
+      } catch {}
+    }
+    return { ...base, title: r.title || base.title, lang: langCode(r.lang), text, readable: text.length > 0, reason: text ? '' : 'empty', ...(values ? { fields: values } : {}) };
   } catch {
     return { ...base, reason: 'restricted' };
   }
@@ -469,30 +531,94 @@ export async function plannedEngine(kind) {
 export async function summarizeTab(tab, opts = {}) {
   await loadInsights();
   const st = await engineState();
-  const engine = opts.engine || pickEngine('tab', st.settings, st.local, st.hasKey);
-  const page = await extractTab(tab, { access: opts.access });
+  // Page fields and status rules (fields.js): when a rule or preset has them, read those values from the
+  // page and let the status rules decide the status in code. The AI then only writes the sentence.
+  const plan = opts.access ? fieldPlanFor(st.settings, tab.url || tab.pendingUrl || '') : null;
+  let engine = null, engineErr = null;
+  try { engine = opts.engine || pickEngine('tab', st.settings, st.local, st.hasKey); } catch (e) { engineErr = e; }
+  const page = await extractTab(tab, { access: opts.access, fields: plan?.fields });
   const instructions = instructionsFor(st.settings, opts.groupName, page.url);
-  const sig = cacheKey([PROMPT_VERSION, engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, fnv(page.text), page.title]);
+  let fieldInfo = null;
+  if (plan && page.fields && foundAny(plan.fields, page.fields)) {
+    const values = { title: page.title, url: page.url, ...page.fields };
+    const decided = decideStatus(plan.rules, values);
+    fieldInfo = {
+      values: page.fields, facts: factsLine(plan.fields, page.fields), pattern: plan.pattern, source: plan.source,
+      status: decided && decided.status !== 'unknown' ? decided.status : null, ruleIndex: decided ? decided.index : -1,
+    };
+  }
+  if (!engine && !fieldInfo?.status) throw engineErr;
+  const sig = cacheKey([PROMPT_VERSION, engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, fnv(page.text), page.title,
+    fieldInfo ? [fieldInfo.values, fieldInfo.pattern, plan.rules] : null]);
   const prev = tabInsight(page.url);
   if (!opts.force && prev?.sig === sig && prev.summary) return putInsight(page.url, {});
   let r;
-  if (engine === 'cloud') {
-    const { system, user } = tabPrompt({ ...page, instructions, lang: uiLang() });
-    const key = await getApiKey();
-    r = parseInsight(await logged({ kind: 'tab', engine: 'cloud', model: st.settings.model, title: page.title, url: page.url, system, user },
-      () => streamGemini({ key, model: st.settings.model, system, user, json: true, signal: opts.signal })));
+  if (fieldInfo?.status) {
+    r = await fieldSentence(page, fieldInfo, instructions, engine, st, opts);
+    r.status = fieldInfo.status;
+    r.facts = fieldInfo.facts;
   } else {
-    r = await localInsight(page, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress });
+    // No status from the fields: the AI decides as before, with the fields it could read put first.
+    const ai = fieldInfo ? { ...page, text: `Page fields (read from the page by code, trust these):\n${fieldsBlock(plan.fields, fieldInfo.values)}\n\n${page.text}` } : page;
+    if (engine === 'cloud') {
+      const { system, user } = tabPrompt({ ...ai, instructions, lang: uiLang() });
+      const key = await getApiKey();
+      r = parseInsight(await logged({ kind: 'tab', engine: 'cloud', model: st.settings.model, title: page.title, url: page.url, system, user },
+        () => streamGemini({ key, model: st.settings.model, system, user, json: true, signal: opts.signal })));
+    } else {
+      r = await localInsight(ai, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress });
+    }
   }
   if (!r.summary) throw new AiError('The AI returned an empty summary.', 'empty');
   // A status set by hand was about the page as it was. The page has changed, so the new analysis wins:
   // otherwise a stale "Needs you" sits next to a summary that says the PR is merged.
-  const changed = prev && prev.textSig && prev.textSig !== fnv(page.text);
+  const textSig = fnv(page.text + (fieldInfo ? JSON.stringify(fieldInfo.values) : ''));
+  const changed = prev && prev.textSig && prev.textSig !== textSig;
   return putInsight(page.url, {
-    summary: r.summary, status: r.status, facts: r.facts || '', engine, sig, textSig: fnv(page.text),
+    summary: r.summary, status: r.status, facts: r.facts || '', engine: r.engine || engine, sig, textSig,
     reason: page.reason, readable: page.readable, title: page.title,
+    statusFrom: fieldInfo?.status ? 'fields' : 'ai',
+    fieldRule: fieldInfo ? (plan.preset || plan.pattern) : undefined,
     ...(changed || opts.force ? { manual: undefined } : {}),
   });
+}
+
+/** The sentence for a tab whose status the page fields decided. Falls back to a template without a model. */
+async function fieldSentence(page, info, instructions, engine, st, opts) {
+  const excerpt = page.text || '';
+  const facts = info.facts;
+  const status = info.status;
+  const meta = { kind: 'tab', title: page.title, url: page.url, fields: info.values, status, statusFrom: 'fields' };
+  try {
+    if (engine === 'cloud') {
+      const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, lang: uiLang(), max: 3000 });
+      const key = await getApiKey();
+      return parseInsight(await logged({ ...meta, engine: 'cloud', model: st.settings.model, system, user },
+        () => streamGemini({ key, model: st.settings.model, system, user, json: 'sentence', signal: opts.signal })));
+    }
+    if (engine === 'local' && st.localApi === 'prompt') {
+      const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, lang: localOut() });
+      const s = await self.LanguageModel.create({ ...lmIO(), initialPrompts: [{ role: 'system', content: system }],
+        monitor(m) { m.addEventListener('downloadprogress', e => opts.onProgress?.(e.total ? e.loaded / e.total : e.loaded)); } }).catch(e => { throw gestureError(e); });
+      try {
+        return parseInsight(await logged({ ...meta, engine: 'local', api: 'prompt', system, user },
+          () => s.prompt(user, { responseConstraint: SENTENCE_SCHEMA, signal: opts.signal })));
+      } finally { s.destroy?.(); }
+    }
+    if (engine === 'local') {
+      const sharedContext = localContext('tab', { instructions });
+      const sum = await getSummarizer(sumOptions({ lang: page.lang, sharedContext }), opts.onProgress);
+      const input = `State: ${facts}\n\n${headTail(excerpt, 3000)}`;
+      const out = await logged({ ...meta, engine: 'local', api: 'summarizer', system: sharedContext, user: input },
+        () => sum.summarize(input, { context: `Page title: ${page.title}`, signal: opts.signal }));
+      return { summary: oneSentence(out) };
+    }
+  } catch (e) {
+    if (e?.name === 'AbortError') throw e;
+    // The status is known; don't lose it because the sentence failed. Use the template instead.
+    return { summary: templateSentence({ title: page.title, facts }), engine: 'none' };
+  }
+  return { summary: templateSentence({ title: page.title, facts }), engine: 'none' };
 }
 
 /**
