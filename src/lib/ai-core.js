@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   rules: [],               // [{ pattern, instructions }] for pages whose URL matches
   cloudConsentAt: 0,
   pageAccessDeclined: false,
+  presets: true,           // use the built-in page fields and status rules (GitHub) where no rule of yours has fields
 });
 
 export function normalizeSettings(s) {
@@ -25,6 +26,7 @@ export function normalizeSettings(s) {
   if (!['off', 'local', 'all'].includes(out.auto)) out.auto = 'local';
   delete out.length;
   out.tabLines = out.tabLines === true;
+  out.presets = out.presets !== false;
   if (typeof out.model !== 'string' || !out.model.trim()) out.model = DEFAULT_MODEL;
   out.model = out.model.trim();
   out.general = clip(String(out.general || ''), MAX_INSTRUCTIONS);
@@ -38,8 +40,16 @@ export function normalizeSettings(s) {
   }
   out.groups = groups;
   out.rules = (Array.isArray(out.rules) ? out.rules : [])
-    .map(r => ({ pattern: String(r?.pattern || '').trim(), instructions: clip(String(r?.instructions || '').trim(), MAX_INSTRUCTIONS) }))
-    .filter(r => r.pattern && r.instructions && compilePattern(r.pattern))
+    .map(r => {
+      const o = { pattern: String(r?.pattern || '').trim(), instructions: clip(String(r?.instructions || '').trim(), MAX_INSTRUCTIONS) };
+      // Page fields and status rules (see fields.js). Kept as the text the user wrote.
+      const fields = clip(String(r?.fields || '').trim(), MAX_INSTRUCTIONS);
+      const statusRules = clip(String(r?.statusRules || '').trim(), MAX_INSTRUCTIONS);
+      if (fields) o.fields = fields;
+      if (fields && statusRules) o.statusRules = statusRules;
+      return o;
+    })
+    .filter(r => r.pattern && (r.instructions || r.fields) && compilePattern(r.pattern))
     .slice(0, MAX_RULES);
   return out;
 }
@@ -62,7 +72,7 @@ export function groupKey(name) {
  */
 export function pickInstructions(settings, groupName, url) {
   if (url) {
-    const r = mostSpecificRule(settings.rules, url);
+    const r = mostSpecificRule((settings.rules || []).filter(x => x.instructions), url);
     if (r) return { text: r.instructions, source: 'rule', pattern: r.pattern };
   }
   const own = groupName != null ? settings.groups?.[groupKey(groupName)]?.trim() : '';
@@ -342,6 +352,32 @@ export function tabPrompt({ title, url, text, instructions, lang = 'en' }) {
   return { system, user };
 }
 
+/* ---------- sentence only (status decided by page fields) ---------- */
+
+export const SENTENCE_SCHEMA = { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] };
+
+/**
+ * When status rules already decided the status from the page's fields, the AI only writes the sentence.
+ * It gets the facts, the status and a short excerpt, not the whole page, and is told not to judge the status.
+ */
+export function sentencePrompt({ title, url, facts, status, excerpt = '', instructions = '', lang = 'en', max = 1500 }) {
+  const label = STATUSES[status]?.label || status;
+  const system = `You write ONE short sentence (at most 25 words) about one browser tab for someone keeping track of many open tabs. ` +
+    `The page's state and status were read from the page by code and are correct: use them, never contradict them, and don't judge the status yourself. ` +
+    `Say what the page is and where it stands. No preamble, no Markdown. Reply with JSON only: {"summary": "..."}. ` +
+    `Write in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
+    (instructions ? `\n\nThe user's instructions for this page (use what they say about the summary; the status is already decided):\n${instructions}` : '');
+  const body = excerpt ? headTail(excerpt, max) : '';
+  const user = `Title: ${title}\nURL: ${url}\nState: ${facts || '(none)'}\nStatus: ${label}\n<page>\n${body || '(no excerpt)'}\n</page>`;
+  return { system, user };
+}
+
+/** A sentence without any AI, from the title and the facts: used when no model is available. */
+export function templateSentence({ title, facts }) {
+  const t = String(title || '').replace(/\s+/g, ' ').trim();
+  return oneSentence(facts ? `${t} · ${facts}` : t, 240);
+}
+
 /** Asks the AI to fill in INSTRUCTION_TEMPLATE for pages matching a rule pattern, from one example page. */
 export function draftPrompt({ pattern, title = '', url = '', text = '', lang = 'en', max = 20000 }) {
   const system = `You help someone write instructions for an AI that summarizes their open browser tabs. ` +
@@ -402,7 +438,10 @@ export function localContext(kind, { groupName, instructions } = {}) {
 
 export function geminiRequest({ model, system, user, json = false }) {
   const generationConfig = { temperature: 0.3 };
-  if (json) {
+  if (json === 'sentence') {
+    generationConfig.responseMimeType = 'application/json';
+    generationConfig.responseSchema = { type: 'OBJECT', properties: { summary: { type: 'STRING' } }, required: ['summary'] };
+  } else if (json) {
     generationConfig.responseMimeType = 'application/json';
     generationConfig.responseSchema = {
       type: 'OBJECT',

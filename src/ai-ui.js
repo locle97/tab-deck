@@ -9,6 +9,7 @@ import {
   effectiveStatus, rollupStatus, needsInsight, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
+import { parseFields, parseStatusRules, decideStatus, factsLine, PRESETS } from './lib/fields.js';
 
 const GEMINI_ORIGINS = ['https://generativelanguage.googleapis.com/*'];
 const AI_STUDIO = 'https://aistudio.google.com/apikey';
@@ -96,7 +97,7 @@ function tabLineInner(t) {
   if (tabErrors.has(t.id)) return `<span class="ai-bad">${esc(tabErrors.get(t.id))}</span>`;
   const ins = AI.tabInsight(urlOf(t));
   if (ins?.summary) {
-    const meta = `${ins.engine === 'cloud' ? 'Gemini · cloud' : 'On-device'} · ${ago(ins.at)}${ins.readable === false ? ' · from the title only' : ''}`;
+    const meta = `${ins.engine === 'cloud' ? 'Gemini · cloud' : ins.engine === 'none' ? 'No AI' : 'On-device'} · ${ago(ins.at)}${ins.readable === false ? ' · from the title only' : ''}${ins.facts ? `\n${ins.facts}` : ''}`;
     return `<span class="ai-sum" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</span>`;
   }
   if (queued.has(t.id)) return '<span class="ai-dim">Waiting to summarize…</span>';
@@ -117,7 +118,9 @@ function tabStatusInner(t, compact) {
   }
   if (!state.settings.tabLines && tabErrors.has(t.id) && !compact) return `<button class="ai-st st-none ai-bad" data-act="ai-status" type="button" title="${esc(tabErrors.get(t.id))}">Couldn’t summarize</button>`;
   const sum = !state.settings.tabLines && ins?.summary ? `${ins.summary}\n\n` : '';
-  const why = sum + (s ? `${label}${ins?.manual ? ' (set by you)' : ' (from AI)'}. Click to change.` : 'No status yet. Click to set one.');
+  const from = ins?.manual ? ' (set by you)' : ins?.statusFrom === 'fields' ? ' (from page fields)' : ' (from AI)';
+  const facts = ins?.facts && !ins?.manual ? `\n${ins.facts}` : '';
+  const why = sum + (s ? `${label}${from}.${facts}\nClick to change.` : 'No status yet. Click to set one.');
   if (compact) return `<button class="ai-dot-btn st-${s || 'none'}" data-act="ai-status" type="button" title="${esc(why)}" aria-label="Status: ${esc(label)}"><i></i></button>`;
   if (!s) return `<button class="ai-st st-none" data-act="ai-status" type="button" title="${esc(why)}">Set status</button>`;
   return `<button class="ai-st st-${s}${ins?.manual ? ' manual' : ''}" data-act="ai-status" type="button" title="${esc(why)}"><i></i>${esc(label)}</button>`;
@@ -510,17 +513,104 @@ const LOCAL_LABEL = {
   unavailable: 'Not available here. It needs desktop Chrome 138 or later with enough memory and free disk space.',
 };
 
+const FIELDS_HINT = `# One per line: name: CSS selector (add @attribute to read an attribute)
+# name[]: … reads every match as a list. name: label: Status reads the value next to a label.
+viewer: meta[name="user-login"] @content
+state: .State
+reviewers[]: .reviewer .name`;
+const STATUS_HINT = `# One per line, first match wins. Statuses: Needs you, In progress, Waiting, Done, Reference, or AI.
+done when state matches /merged|closed/
+needs you when reviewers has {viewer}
+waiting when state is open
+ai otherwise`;
+const presetOptions = () => PRESETS.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+const rowsFor = t => (t ? Math.min(12, Math.max(3, t.split('\n').length + 1)) : 3);
+
 function ruleRow(r = { pattern: '', instructions: '' }) {
+  const hasFields = !!(r.fields || r.statusRules);
   return `<div class="ai-rule">
     <div class="ai-rule-top"><input class="ai-rule-pat" type="text" spellcheck="false" value="${esc(r.pattern)}" placeholder="github.com/*/*/pull/*" aria-label="Page pattern">
       <button class="icon-btn" data-m="rdel" type="button" title="Remove rule" aria-label="Remove rule">${IC.close}</button></div>
     <div class="ai-rule-count ai-small"></div>
-    <textarea class="ai-rule-ins" rows="${r.instructions ? Math.min(10, Math.max(3, r.instructions.split('\n').length + 1)) : 3}" maxlength="${MAX_INSTRUCTIONS}" placeholder="${esc(INSTRUCTION_TEMPLATE)}">${esc(r.instructions)}</textarea>
+    <textarea class="ai-rule-ins" rows="${r.instructions ? Math.min(10, Math.max(3, r.instructions.split('\n').length + 1)) : 3}" maxlength="${MAX_INSTRUCTIONS}" placeholder="${esc(INSTRUCTION_TEMPLATE)}" aria-label="Instructions">${esc(r.instructions)}</textarea>
     <div class="ai-rule-actions"><button class="btn sm" data-m="rdraft" type="button" title="Look at a matching open tab and draft instructions from the template">${IC.spark}<span>Draft with AI</span></button>
       <button class="link ai-small" data-m="rtpl" type="button">Insert template</button>
       <span class="ai-rule-msg ai-small" aria-live="polite"></span>
       <button class="link ai-small" data-m="rundo" type="button" hidden>Undo</button></div>
+    <details class="ai-fields"${hasFields ? ' open' : ''}>
+      <summary class="ai-small">Page fields and status rules${hasFields ? '' : ' <span class="ai-muted">(optional)</span>'}</summary>
+      <p class="ai-muted ai-small">Read only these values from the page, and decide the status from them without the AI. The AI then only writes the sentence. Leave empty to send the whole page to the AI.</p>
+      <label class="ai-small ai-muted">Fields</label>
+      <textarea class="ai-rule-fields mono" rows="${rowsFor(r.fields)}" maxlength="${MAX_INSTRUCTIONS}" spellcheck="false" placeholder="${esc(FIELDS_HINT)}" aria-label="Page fields">${esc(r.fields || '')}</textarea>
+      <label class="ai-small ai-muted">Status rules</label>
+      <textarea class="ai-rule-status mono" rows="${rowsFor(r.statusRules)}" maxlength="${MAX_INSTRUCTIONS}" spellcheck="false" placeholder="${esc(STATUS_HINT)}" aria-label="Status rules">${esc(r.statusRules || '')}</textarea>
+      <div class="ai-rule-actions">
+        <button class="btn sm" data-m="ftest" type="button" title="Read these fields from a matching open tab and show the status they give">Test on an open tab</button>
+        <label class="ai-small ai-muted">Start from <select class="ai-preset" aria-label="Start from a preset"><option value="">a preset…</option>${presetOptions()}</select></label>
+      </div>
+      <div class="ai-fields-out ai-small" aria-live="polite"></div>
+    </details>
   </div>`;
+}
+
+/** Page fields on a rule: validate as you type, start from a preset, and test on a matching open tab. */
+function wireFields(el, pat) {
+  const fTa = el.querySelector('.ai-rule-fields');
+  const sTa = el.querySelector('.ai-rule-status');
+  const out = el.querySelector('.ai-fields-out');
+  const errorsHtml = () => {
+    const fe = parseFields(fTa.value).errors.map(e => `Fields, line ${e.line}: ${esc(e.message)}`);
+    const se = parseStatusRules(sTa.value).errors.map(e => `Status rules, line ${e.line}: ${esc(e.message)}`);
+    return [...fe, ...se].slice(0, 4).map(x => `<div class="ai-bad">${x}</div>`).join('');
+  };
+  const check = () => { out.innerHTML = errorsHtml(); };
+  fTa.addEventListener('input', check);
+  sTa.addEventListener('input', check);
+  el.querySelector('.ai-preset').onchange = e => {
+    const p = PRESETS.find(x => x.id === e.target.value);
+    e.target.value = '';
+    if (!p) return;
+    if ((fTa.value.trim() || sTa.value.trim()) && !out.dataset.confirm) {
+      out.dataset.confirm = p.id;
+      out.innerHTML = `<div>This replaces the fields and status rules here. <button class="link ai-small" type="button" data-pc="${esc(p.id)}">Replace</button></div>`;
+      out.querySelector('[data-pc]').onclick = () => { delete out.dataset.confirm; apply(p); };
+      return;
+    }
+    apply(p);
+  };
+  const apply = p => {
+    if (!pat.value.trim()) { pat.value = p.pattern; pat.dispatchEvent(new Event('input')); }
+    fTa.value = p.fields; fTa.rows = rowsFor(p.fields);
+    sTa.value = p.statusRules; sTa.rows = rowsFor(p.statusRules);
+    out.textContent = `Copied the ${p.name} preset. Edit it as you like.`;
+  };
+  el.querySelector('[data-m=ftest]').onclick = async e => {
+    const btn = e.currentTarget;
+    const errs = errorsHtml();
+    if (errs) { out.innerHTML = errs; return; }
+    const { fields } = parseFields(fTa.value);
+    if (!fields.length) { out.textContent = 'Add at least one field first.'; fTa.focus(); return; }
+    const m = compilePattern(pat.value.trim());
+    if (!m) { out.textContent = 'Write a valid pattern first.'; pat.focus(); return; }
+    if (!state.access) { out.textContent = 'Testing needs page access (Settings › General › Privacy).'; return; }
+    const tab = ctx.allTabs().map(x => x.t).find(t => m.test(urlOf(t)) && isReadableUrl(urlOf(t)) && !t.discarded && !t.frozen);
+    if (!tab) { out.textContent = 'No open, awake tab matches this pattern. Open one and try again.'; return; }
+    btn.disabled = true;
+    try {
+      const values = await AI.readFields(tab, fields);
+      const { rules } = parseStatusRules(sTa.value);
+      const d = rules.length ? decideStatus(rules, values) : null;
+      const show = v => (Array.isArray(v) ? (v.length ? v.join(' | ') : '') : v);
+      const rows = fields.map(f => { const v = show(values[f.name]); return `<tr><th>${esc(f.name)}</th><td>${v ? esc(v) : '<span class="ai-bad">not found</span>'}</td></tr>`; }).join('');
+      const verdict = !rules.length ? 'No status rules, so the AI decides the status (with these fields put first).'
+        : !d ? 'No status rule matched, so the AI decides the status.'
+        : d.status === 'unknown' ? `Rule ${d.index + 1} says to let the AI decide.`
+        : `Status: <b>${esc(STATUSES[d.status].label)}</b> (rule ${d.index + 1}: <code>${esc(sTa.value.split('\n').filter(l => l.trim() && !l.trim().startsWith('#'))[d.index] || '')}</code>)`;
+      out.innerHTML = `<div>From “${esc((tab.title || urlOf(tab)).slice(0, 70))}”</div><table class="ai-fields-tbl">${rows}</table><div>${verdict}</div>${factsLine(fields, values) ? `<div class="ai-muted">Facts: ${esc(factsLine(fields, values))}</div>` : ''}`;
+    } catch (err) {
+      out.innerHTML = `<div class="ai-bad">Couldn’t read that tab: ${esc(err?.message || err)}</div>`;
+    } finally { btn.disabled = false; }
+  };
 }
 
 function ruleCount(pattern) {
@@ -607,6 +697,8 @@ export async function openAiSettings(opts = {}) {
       <h3>Sites and pages</h3>
       <div class="ai-field" id="aiRulesField">
         <div class="ai-muted ai-small">A site (<code>github.com</code>) covers all its pages. A page pattern matches the whole address without https:// — <code>*</code> is one part of the path, <code>**</code> is anything — so <code>github.com/*/*</code> is a repo’s home, <code>github.com/*/*/pulls</code> its pull request list and <code>github.com/*/*/pull/*</code> one pull request. Or write a <code>/regular expression/</code>. When several rules match a page, only the most specific one is used (a page pattern beats a whole site), and it replaces the group and general instructions there.</div>
+        <label class="ai-check"><input type="checkbox" id="aiPresets" ${s.presets ? 'checked' : ''}><span>Use built-in page fields for ${PRESETS.map(p => esc(p.name)).join(' and ')} pages</span></label>
+        <p class="ai-muted ai-small ai-indent">Their status comes from what the page shows (state, reviewers, checks, who you are) instead of the AI. A rule of yours with page fields replaces them. Open “Page fields and status rules” on a rule to read specific values from any site.</p>
         <div id="aiRules">${rules.map(ruleRow).join('')}</div>
         <button class="btn sm" id="aiAddRule" type="button" ${rules.length >= MAX_RULES ? 'disabled' : ''}>+ Add rule</button>
       </div>
@@ -653,6 +745,7 @@ export async function openAiSettings(opts = {}) {
       pat.addEventListener('input', count);
       count();
       el.querySelector('[data-m=rdel]').onclick = () => { el.remove(); $b('#aiAddRule').disabled = false; };
+      wireFields(el, pat);
       const ta = el.querySelector('.ai-rule-ins');
       const msg = el.querySelector('.ai-rule-msg');
       const undo = el.querySelector('[data-m=rundo]');
@@ -745,13 +838,30 @@ export async function openAiSettings(opts = {}) {
       const newKey = $b('#aiKey').value.trim();
       // Ask for the Gemini host inside the click, before any await.
       const perm = newKey && newKey !== key ? chrome.permissions.request({ origins: GEMINI_ORIGINS }).catch(() => false) : Promise.resolve(true);
-      const rulesOut = [...box.querySelectorAll('.ai-rule')].map(el => ({ pattern: el.querySelector('.ai-rule-pat').value.trim(), instructions: el.querySelector('.ai-rule-ins').value.trim() }));
-      const bad = rulesOut.find(r => (r.pattern || r.instructions) && (!r.pattern || !r.instructions || !compilePattern(r.pattern)));
+      const rulesOut = [...box.querySelectorAll('.ai-rule')].map(el => ({
+        el,
+        pattern: el.querySelector('.ai-rule-pat').value.trim(),
+        instructions: el.querySelector('.ai-rule-ins').value.trim(),
+        fields: el.querySelector('.ai-rule-fields').value.trim(),
+        statusRules: el.querySelector('.ai-rule-status').value.trim(),
+      }));
+      const problem = r => {
+        if (!(r.pattern || r.instructions || r.fields || r.statusRules)) return '';
+        if (!r.pattern) return 'A rule needs a pattern.';
+        if (!compilePattern(r.pattern)) return 'One rule’s pattern isn’t valid.';
+        if (!r.instructions && !r.fields) return 'A rule needs instructions or page fields.';
+        if (r.statusRules && !r.fields) return 'Status rules need page fields to read.';
+        const fe = parseFields(r.fields).errors[0];
+        if (fe) return `Page fields, line ${fe.line}: ${fe.message}.`;
+        const se = parseStatusRules(r.statusRules).errors[0];
+        if (se) return `Status rules, line ${se.line}: ${se.message}.`;
+        return '';
+      };
+      const bad = rulesOut.find(r => problem(r));
       if (bad) {
-        const el = [...box.querySelectorAll('.ai-rule')].find(x => x.querySelector('.ai-rule-pat').value.trim() === bad.pattern);
-        el?.scrollIntoView({ block: 'center' });
-        el?.classList.add('flash');
-        ctx.toast(!bad.pattern ? 'A rule needs a pattern.' : !bad.instructions ? 'A rule needs instructions.' : 'One rule’s pattern isn’t valid.');
+        bad.el.scrollIntoView({ block: 'center' });
+        bad.el.classList.add('flash');
+        ctx.toast(esc(problem(bad)));
         return;
       }
       const groups = { ...state.settings.groups };
@@ -767,7 +877,8 @@ export async function openAiSettings(opts = {}) {
         model: $b('#aiModel').value.trim() || DEFAULT_MODEL,
         general: $b('#aiGeneral').value.trim(),
         groups,
-        rules: rulesOut.filter(r => r.pattern && r.instructions),
+        rules: rulesOut.filter(r => r.pattern && (r.instructions || r.fields)).map(({ el, ...r }) => r),
+        presets: $b('#aiPresets').checked,
         ...(newKey !== key ? { cloudConsentAt: 0 } : {}),
       });
       await refreshState();

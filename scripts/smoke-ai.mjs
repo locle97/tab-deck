@@ -21,7 +21,9 @@ const step = msg => console.log('✓', msg);
 
 const server = createServer((req, res) => {
   res.setHeader('content-type', 'text/html');
-  const body = req.url === '/long'
+  const body = req.url === '/issue/7'
+    ? `<meta name="user-login" content="me-user"><main><h1>Fix the login page</h1><span class="State">Open</span><dl><dt>Assignee</dt><dd>me-user</dd><dt>Labels</dt><dd>bug</dd></dl><p>Long discussion that says Closed and Merged many times. ${'Closed. Merged. '.repeat(40)}</p></main>`
+    : req.url === '/long'
     ? `<main><h1>Long read</h1><span class="State" title="Status: Merged">Merged</span><article><p>One comment</p></article><div class="reviewers"><svg class="octicon octicon-check-circle-fill color-fg-success" aria-hidden="true"><path d="M0 0"/></svg> reviewer-ann <svg class="octicon octicon-dot-fill fgColor-attention" aria-hidden="true"></svg> ci-build <button aria-label="Re-request review"><svg class="octicon octicon-sync"></svg></button><clipboard-copy aria-label="Copy code"><svg class="octicon octicon-check color-fg-success"></svg></clipboard-copy><button><svg class="octicon octicon-git-pull-request-closed"></svg> Close pull request</button></div>${Array.from({ length: 60 }, (_, i) => `<p>Paragraph ${i} ${'lorem ipsum '.repeat(30)}</p>`).join('')}<form><h3 class="status-heading">Pull request successfully merged and closed</h3></form></main>`
     : `<nav>Site menu</nav><main><h1>${req.url}</h1><p>The secret phrase on ${req.url} is purple-otter.</p></main><footer>Footer</footer>`;
   res.end(`<!doctype html><html lang="en"><title>Page ${req.url}</title>${body}`);
@@ -350,8 +352,55 @@ try {
   assert.equal((await page.evaluate(() => window.tabDeskAiLog())).length, 0);
   step('every prompt and answer is logged in the extension (tabDeskAiLog() in the console), never the API key');
 
+  // Page fields and status rules: read specific values from any site, decide the status in code.
+  const p3 = await ctx.newPage();
+  await p3.goto(U('/issue/7'));
+  await page.bringToFront();
+  await page.click('#settingsBtn');
+  await page.click('[role=tab][data-tab=instructions]');
+  assert.equal(await page.isChecked('#aiPresets'), true, 'built-in GitHub fields are on by default');
+  await page.click('#aiAddRule');
+  const fr = page.locator('.ai-rule:last-child');
+  await fr.locator('.ai-rule-pat').fill(`localhost:${port}/issue/*`);
+  await fr.locator('.ai-fields > summary').click();
+  await fr.locator('.ai-rule-fields').fill('viewer: meta[name="user-login"] @content\nstate: .State\nassignee: label: Assignee\nmissing: .nope');
+  await fr.locator('.ai-rule-status').fill('done when state matches /closed|merged/\nneeds you when assignee has {viewer}\nai otherwise');
+  await fr.locator('[data-m=ftest]').click();
+  await page.waitForFunction(() => /Needs you/.test(document.querySelector('.ai-rule:last-child .ai-fields-out')?.textContent || ''));
+  const out = await fr.locator('.ai-fields-out').textContent();
+  assert.match(out, /viewerme-user/);
+  assert.match(out, /stateOpen/);
+  assert.match(out, /assigneeme-user/, 'label: reads the value next to a label');
+  assert.match(out, /missingnot found/);
+  assert.match(out, /rule 2/);
+  if (SHOTS) { await fr.scrollIntoViewIfNeeded(); await page.screenshot({ path: join(SHOTS, 'ai-page-fields.png') }); }
+  // A bad line is flagged and blocks saving.
+  await fr.locator('.ai-rule-status').fill('soon when state is open');
+  await page.waitForSelector('.ai-rule:last-child .ai-fields-out .ai-bad');
+  await page.click('[data-m=ok]');
+  await page.waitForFunction(() => /Status rules, line 1/.test(document.querySelector('.toast')?.textContent || ''));
+  await fr.locator('.ai-rule-status').fill('done when state matches /closed|merged/\nneeds you when assignee has {viewer}\nai otherwise');
+  await page.click('[data-m=ok]');
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
+  saved = (await page.evaluate(() => chrome.storage.local.get('aiSettings'))).aiSettings;
+  const fRule = saved.rules.find(r => r.pattern.includes('/issue/'));
+  assert.equal(fRule.instructions, '', 'a rule can have page fields and no instructions');
+  assert.match(fRule.fields, /assignee: label: Assignee/);
+  await page.click('[data-nav=inbox]');
+  await page.hover('.tab:has-text("/issue/7")');
+  await page.click('.tab:has-text("/issue/7") [data-act=ai-tab]');
+  await waitLine(page, '/issue/7', /^A cloud tab sentence from Gemini\.$/);
+  assert.match(await page.textContent('.tab:has-text("/issue/7") .ai-st'), /Needs you/, 'status from the rules, not the AI’s "waiting"');
+  assert.match(await page.getAttribute('.tab:has-text("/issue/7") .ai-st', 'title'), /from page fields[\s\S]*state: Open · assignee: me-user/);
+  f = await page.evaluate(() => window.__ai.fetches.at(-1));
+  assert.deepEqual(f.body.generationConfig.responseSchema.required, ['summary'], 'the AI is asked for the sentence only');
+  assert.match(f.body.contents[0].parts[0].text, /State: state: Open · assignee: me-user\nStatus: Needs you/);
+  assert.ok(f.body.contents[0].parts[0].text.length < 4000, 'only a short excerpt is sent');
+  step('page fields on any site: Test shows each value and the status; the status comes from the rules and the AI only writes the sentence');
+
   // Turning AI off hides lines, statuses and buttons.
   await page.click('#settingsBtn');
+  await page.click('[role=tab][data-tab=general]');
   await page.uncheck('#aiEnabled');
   await page.click('[data-m=ok]');
   await page.waitForFunction(() => !document.querySelector('[data-act=ai-group]'));
