@@ -7,6 +7,7 @@ import * as AI from './lib/ai.js';
 import {
   groupKey, chooseEngine, DEFAULT_MODEL, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
   effectiveStatus, rollupStatus, needsInsight, isReadableUrl, compilePattern, suggestPattern, rulesFor,
+  INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
 
 const GEMINI_ORIGINS = ['https://generativelanguage.googleapis.com/*'];
@@ -463,11 +464,11 @@ export function openGroupInstructions(g) {
   const s = state.settings;
   const cur = s.groups[groupKey(g.name)] || '';
   ctx.openModal(`<div class="dialog-head"><h2>AI instructions for “${esc(g.name)}”</h2>
-      <p>Added to every summary of this group and of the tabs in it. Saved by group name, so it also applies after a restart or when you restore it from Workspaces.</p></div>
+      <p>Used for this group’s sentence and its tabs, in place of the general instructions. A matching page rule still wins for its pages. Saved by group name, so it also applies after a restart or when you restore it from Workspaces.</p></div>
     <div class="dialog-body">
       <label class="ai-field"><span>Instructions for this group</span>
-        <textarea id="aiGroupInstr" rows="5" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. These are my open pull requests. Mark a PR Needs you when a review is requested from me.">${esc(cur)}</textarea></label>
-      <div class="ai-muted ai-small">${s.general ? `General instructions also apply: “${esc(s.general.length > 140 ? s.general.slice(0, 140) + '…' : s.general)}”` : 'No general instructions set.'} <button class="link" data-m="general" type="button">Edit general instructions</button></div>
+        <textarea id="aiGroupInstr" rows="9" maxlength="${MAX_INSTRUCTIONS}" placeholder="${esc(INSTRUCTION_TEMPLATE)}">${esc(cur)}</textarea></label>
+      <div class="ai-muted ai-small">${cur ? '' : '<button class="link" data-m="tpl" type="button">Insert template</button> · '}<button class="link" data-m="general" type="button">How instructions are picked</button></div>
     </div>
     <div class="dialog-foot">${cur ? '<button class="btn danger" data-m="clear" type="button" style="margin-right:auto">Remove</button>' : ''}<button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Save</button></div>`,
   box => {
@@ -486,6 +487,7 @@ export function openGroupInstructions(g) {
     box.querySelector('[data-m=ok]').onclick = () => save(ta.value);
     box.querySelector('[data-m=clear]')?.addEventListener('click', () => save(''));
     box.querySelector('[data-m=general]').onclick = () => openAiSettings({ focus: 'general' });
+    box.querySelector('[data-m=tpl]')?.addEventListener('click', e => { ta.value = INSTRUCTION_TEMPLATE; e.target.remove(); ta.focus(); });
   });
 }
 
@@ -503,7 +505,11 @@ function ruleRow(r = { pattern: '', instructions: '' }) {
     <div class="ai-rule-top"><input class="ai-rule-pat" type="text" spellcheck="false" value="${esc(r.pattern)}" placeholder="github.com/*/*/pull/*" aria-label="Page pattern">
       <button class="icon-btn" data-m="rdel" type="button" title="Remove rule" aria-label="Remove rule">${IC.close}</button></div>
     <div class="ai-rule-count ai-small"></div>
-    <textarea class="ai-rule-ins" rows="2" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. Say whether it’s merged, which checks fail, and whether my review is requested. Needs you if my review is requested.">${esc(r.instructions)}</textarea>
+    <textarea class="ai-rule-ins" rows="${r.instructions ? Math.min(10, Math.max(3, r.instructions.split('\n').length + 1)) : 3}" maxlength="${MAX_INSTRUCTIONS}" placeholder="${esc(INSTRUCTION_TEMPLATE)}">${esc(r.instructions)}</textarea>
+    <div class="ai-rule-actions"><button class="btn sm" data-m="rdraft" type="button" title="Look at a matching open tab and draft instructions from the template">${IC.spark}<span>Draft with AI</span></button>
+      <button class="link ai-small" data-m="rtpl" type="button">Insert template</button>
+      <span class="ai-rule-msg ai-small" aria-live="polite"></span>
+      <button class="link ai-small" data-m="rundo" type="button" hidden>Undo</button></div>
   </div>`;
 }
 
@@ -576,13 +582,21 @@ export async function openAiSettings(opts = {}) {
       </section>
 
       <section class="settings-panel" role="tabpanel" id="setPanel-instructions" aria-labelledby="setTab-instructions" ${tab === 'instructions' ? '' : 'hidden'}>
-      <h3 class="first">General instructions</h3>
-      <label class="ai-field"><span>Added to every summary</span>
-        <textarea id="aiGeneral" rows="3" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. Write in Vietnamese.">${esc(s.general)}</textarea></label>
+      <h3 class="first">How the prompt is built</h3>
+      <p class="ai-muted ai-small">Every tab summary starts with a fixed base prompt that asks for JSON in the order <code>facts</code>, <code>summary</code>, <code>status</code>. After it comes one set of instructions, the most specific one: a matching page rule, else the group’s, else the general instructions below, else the default ones. They replace each other; they don’t add up.</p>
+      <details class="ai-prompt-peek"><summary>Show the base prompt and the default instructions</summary>
+        <div class="ai-small ai-muted">Base prompt (always used)</div><pre>${esc(baseTabPrompt('en'))}</pre>
+        <div class="ai-small ai-muted">Default instructions (used when nothing else applies)</div><pre>${esc(DEFAULT_TAB_INSTRUCTIONS)}</pre>
+      </details>
+
+      <h3>General instructions</h3>
+      <label class="ai-field"><span>Used for tabs with no page rule or group instructions. Leave empty to use the default ones.</span>
+        <textarea id="aiGeneral" rows="${s.general ? Math.min(10, s.general.split('\n').length + 1) : 3}" maxlength="${MAX_INSTRUCTIONS}" placeholder="${esc(INSTRUCTION_TEMPLATE)}">${esc(s.general)}</textarea></label>
+      ${s.general ? '' : '<div class="ai-rule-actions"><button class="link ai-small" id="aiGeneralDefault" type="button">Start from the default instructions</button></div>'}
 
       <h3>Sites and pages</h3>
       <div class="ai-field" id="aiRulesField">
-        <div class="ai-muted ai-small">A site (<code>github.com</code>) covers all its pages. A page pattern matches the whole address without https:// — <code>*</code> is one part of the path, <code>**</code> is anything — so <code>github.com/*/*</code> is a repo’s home, <code>github.com/*/*/pulls</code> its pull request list and <code>github.com/*/*/pull/*</code> one pull request. Or write a <code>/regular expression/</code>. Every matching rule applies, top to bottom.</div>
+        <div class="ai-muted ai-small">A site (<code>github.com</code>) covers all its pages. A page pattern matches the whole address without https:// — <code>*</code> is one part of the path, <code>**</code> is anything — so <code>github.com/*/*</code> is a repo’s home, <code>github.com/*/*/pulls</code> its pull request list and <code>github.com/*/*/pull/*</code> one pull request. Or write a <code>/regular expression/</code>. When several rules match a page, only the most specific one is used (a page pattern beats a whole site), and it replaces the group and general instructions there.</div>
         <div id="aiRules">${rules.map(ruleRow).join('')}</div>
         <button class="btn sm" id="aiAddRule" type="button" ${rules.length >= MAX_RULES ? 'disabled' : ''}>+ Add rule</button>
       </div>
@@ -629,8 +643,50 @@ export async function openAiSettings(opts = {}) {
       pat.addEventListener('input', count);
       count();
       el.querySelector('[data-m=rdel]').onclick = () => { el.remove(); $b('#aiAddRule').disabled = false; };
+      const ta = el.querySelector('.ai-rule-ins');
+      const msg = el.querySelector('.ai-rule-msg');
+      const undo = el.querySelector('[data-m=rundo]');
+      let before = null;
+      const fill = (text, note) => {
+        before = ta.value;
+        ta.value = text;
+        ta.rows = Math.min(10, text.split('\n').length + 1);
+        msg.textContent = note || '';
+        undo.hidden = !before.trim();
+        ta.focus();
+      };
+      undo.onclick = () => { if (before != null) ta.value = before; before = null; undo.hidden = true; msg.textContent = ''; };
+      el.querySelector('[data-m=rtpl]').onclick = () => fill(INSTRUCTION_TEMPLATE, 'Replace each … with what you want.');
+      el.querySelector('[data-m=rdraft]').onclick = async e => {
+        const btn = e.currentTarget;
+        const m = compilePattern(pat.value.trim());
+        if (!m) { msg.textContent = 'Write a valid pattern first.'; pat.focus(); return; }
+        const matching = ctx.allTabs().map(x => x.t).filter(t => m.test(urlOf(t)));
+        const tab = matching.find(t => isReadableUrl(urlOf(t)) && !t.discarded) || matching[0] || null;
+        btn.disabled = true;
+        const label = btn.querySelector('span');
+        label.textContent = 'Drafting…';
+        msg.textContent = tab ? `Looking at “${(tab.title || urlOf(tab)).slice(0, 60)}”…` : 'No open tab matches, so drafting from the pattern only…';
+        try {
+          const text = await AI.draftInstructions({ pattern: pat.value.trim(), tab, access: state.access });
+          fill(text, 'Drafted by AI. Edit it as you like.');
+        } catch (err) {
+          if (!ta.value.trim()) fill(INSTRUCTION_TEMPLATE, `${err?.message || 'The AI couldn’t draft this.'} Here’s the template to fill in.`);
+          else msg.textContent = err?.message || 'The AI couldn’t draft this.';
+        } finally {
+          btn.disabled = false;
+          label.textContent = 'Draft with AI';
+        }
+      };
     };
     box.querySelectorAll('.ai-rule').forEach(wireRule);
+    $b('#aiGeneralDefault')?.addEventListener('click', e => {
+      const g = $b('#aiGeneral');
+      if (!g.value.trim()) g.value = DEFAULT_TAB_INSTRUCTIONS;
+      g.rows = Math.min(10, g.value.split('\n').length + 1);
+      g.focus();
+      e.target.parentElement.remove();
+    });
     $b('#aiAddRule').onclick = () => {
       $b('#aiRules').insertAdjacentHTML('beforeend', ruleRow());
       const el = box.querySelector('.ai-rule:last-child');

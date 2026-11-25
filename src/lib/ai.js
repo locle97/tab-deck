@@ -5,7 +5,8 @@
 
 import {
   DEFAULT_SETTINGS, normalizeSettings, instructionsFor, chooseEngine, cleanText, langCode,
-  isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, userInstructionBlock,
+  isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
+  baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   cacheKey, fnv, pruneCache, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
   insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
 } from './ai-core.js';
@@ -56,7 +57,7 @@ export function onSettingsChanged(cb) {
   });
 }
 
-export { DEFAULT_SETTINGS, instructionsFor };
+export { DEFAULT_SETTINGS, instructionsFor, pickInstructions, baseTabPrompt, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS };
 
 /* ---------- page access ---------- */
 
@@ -239,7 +240,7 @@ addEventListener('pagehide', dropSessions);
 function getBaseSession(onProgress) {
   touchIdle();
   if (!baseSession) {
-    const { system } = tabPrompt({ title: '', url: '', text: '', instructions: '', lang: localOut() });
+    const system = baseTabPrompt(localOut());
     baseSession = self.LanguageModel.create({
       ...lmIO(),
       initialPrompts: [{ role: 'system', content: system }],
@@ -268,7 +269,7 @@ async function localInsight(page, instructions, { api, signal, onProgress }) {
     const base = await getBaseSession(onProgress);
     const s = await base.clone({ signal });
     try {
-      const user = `${userInstructionBlock(instructions).trim()}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
+      const user = `${tabInstructionBlock(instructions)}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
       const out = await s.prompt(user, { responseConstraint: INSIGHT_SCHEMA, signal });
       return parseInsight(out);
     } finally { s.destroy?.(); }
@@ -453,6 +454,31 @@ export async function summarizeGroup(group, opts = {}) {
 }
 
 /** Start the on-device model download. Call from a click. */
+/**
+ * Drafts instructions for a page rule by filling in INSTRUCTION_TEMPLATE from one example page.
+ * opts: { pattern, tab (an open tab matching the pattern, or null), access, signal }
+ * Only the title and address are sent to Gemini unless the user has agreed to send page content.
+ */
+export async function draftInstructions({ pattern, tab = null, access = false, signal } = {}) {
+  const st = await engineState();
+  const engine = pickEngine('tab', st.settings, st.local, st.hasKey);
+  const cloudOk = engine !== 'cloud' || !!st.settings.cloudConsentAt;
+  const page = tab ? await extractTab(tab, { access: access && cloudOk }) : { title: '', url: '', text: '' };
+  let out;
+  if (engine === 'cloud') {
+    const { system, user } = draftPrompt({ pattern, ...page, lang: uiLang() });
+    out = await streamGemini({ key: await getApiKey(), model: st.settings.model, system, user, signal });
+  } else {
+    if (st.localApi !== 'prompt') throw new AiError('Drafting needs Chrome’s Prompt API or a Gemini key.', 'no-engine');
+    const { system, user } = draftPrompt({ pattern, ...page, lang: localOut(), max: 5000 });
+    const s = await self.LanguageModel.create({ ...lmIO(), initialPrompts: [{ role: 'system', content: system }] }).catch(e => { throw gestureError(e); });
+    try { out = await s.prompt(user, { signal }); } finally { s.destroy?.(); }
+  }
+  const text = cleanDraft(out);
+  if (!text) throw new AiError('The AI returned an empty draft.', 'empty');
+  return text;
+}
+
 export async function downloadLocalModel(onProgress) {
   const { api } = await localAvailability();
   if (api === 'prompt') await getBaseSession(onProgress);

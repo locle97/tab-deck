@@ -47,6 +47,9 @@ function fakes() {
     async clone() { return new FakeLM(this.o); }
     async prompt(text, opts = {}) {
       ai.calls.push({ system: this.o.initialPrompts?.[0]?.content || '', text, json: !!opts.responseConstraint });
+      if (/write instructions for an AI that summarizes/.test(this.o.initialPrompts?.[0]?.content || '')) {
+        return 'Here you go:\n```\nThis page is: a test page.\nFacts: the secret phrase.\nSummary: say the secret phrase.\nStatus:\n- Needs you when the phrase is red.\n```';
+      }
       if (opts.responseConstraint) {
         const status = /PR rule/.test(text) ? 'action' : /purple-otter/.test(text) ? 'working' : 'info';
         const what = /purple-otter/.test(text) ? 'mentions purple-otter' : 'no page text';
@@ -194,7 +197,11 @@ try {
   const prCall = calls.find(c => c.json && c.text.includes('/pr/5'));
   const alphaCall = calls.find(c => c.json && c.text.includes('/alpha'));
   const longCall = calls.find(c => c.json && c.text.includes('/long'));
-  assert.match(prCall.text, /Write in Vietnamese\.\nFocus on the secret phrase\.\nPR rule/);
+  assert.match(prCall.text, /^Instructions for this page:\nPR rule/, 'the page rule replaces group and general instructions');
+  assert.doesNotMatch(prCall.text, /Vietnamese|Focus on the secret/);
+  assert.match(alphaCall.text, /^Instructions for this page:\nFocus on the secret phrase\./, 'group instructions replace the general ones');
+  assert.doesNotMatch(alphaCall.text, /Vietnamese/);
+  assert.match(prCall.system || calls.find(c => c.json).system, /Reply with JSON only, in this order: \{"facts"/);
   assert.doesNotMatch(alphaCall.text, /PR rule/);
   assert.doesNotMatch(alphaCall.text, /Site menu|Footer/);
   assert.ok(longCall.text.length < 7000, 'long pages are trimmed for the on-device model');
@@ -218,8 +225,23 @@ try {
   await page.click('.tab:has-text("/long") .ai-st');
   await page.click('.menu button:has-text("pages like this")');
   await page.waitForFunction(p => [...document.querySelectorAll('.ai-rule-pat')].some(i => i.value === p), `localhost:${port}/long`);
+  // Draft with AI fills the template from the matching tab; Undo is not offered for an empty box.
+  const rule = page.locator('.ai-rule:last-child');
+  await rule.locator('[data-m=rdraft]').click();
+  await page.waitForFunction(() => /^This page is: a test page\./.test(document.querySelector('.ai-rule:last-child .ai-rule-ins').value));
+  const draftCall = await page.evaluate(() => window.__ai.calls.filter(c => /write instructions for an AI/.test(c.system)).at(-1));
+  assert.match(draftCall.system, /This page is: …\nFacts: …/, 'the template is in the draft prompt');
+  assert.match(draftCall.text, /Pattern: localhost:\d+\/long/);
+  assert.match(draftCall.text, /Paragraph 3 /, 'the matching tab’s page text is used');
+  assert.match(await rule.locator('.ai-rule-msg').textContent(), /Drafted by AI/);
+  await rule.locator('.ai-rule-ins').fill('My own words');
+  await rule.locator('[data-m=rtpl]').click();
+  assert.match(await rule.locator('.ai-rule-ins').inputValue(), /^This page is: …/);
+  await rule.locator('[data-m=rundo]').click();
+  assert.equal(await rule.locator('.ai-rule-ins').inputValue(), 'My own words');
+  if (SHOTS) { await rule.scrollIntoViewIfNeeded(); await page.screenshot({ path: join(SHOTS, 'ai-rule-draft.png') }); }
   await page.click('[data-m=cancel]');
-  step('status menu offers instructions for pages like this one, with a suggested pattern');
+  step('status menu offers instructions for pages like this one; Draft with AI fills the template from that page; Insert template and Undo');
 
   // Automatic summaries: the model is ready now, so a new tab gets summarized on its own.
   const p2 = await ctx.newPage();
@@ -271,7 +293,8 @@ try {
   let f = await page.evaluate(() => window.__ai.fetches.at(-1));
   assert.equal(f.headers['x-goog-api-key'], 'good-key');
   assert.doesNotMatch(f.url, /good-key/);
-  assert.match(f.body.systemInstruction.parts[0].text, /Write in Vietnamese\.\nFocus on the secret phrase\./);
+  assert.match(f.body.systemInstruction.parts[0].text, /Focus on the secret phrase\./);
+  assert.doesNotMatch(f.body.systemInstruction.parts[0].text, /Vietnamese/);
   step('with a key, the group sentence comes from Gemini after consent, with instructions, key in a header');
 
   // Gemini for tabs: JSON summary + status.
@@ -286,7 +309,7 @@ try {
   assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Waiting/);
   f = await page.evaluate(() => window.__ai.fetches.at(-1));
   assert.equal(f.body.generationConfig.responseMimeType, 'application/json');
-  assert.match(f.body.systemInstruction.parts[0].text, /PR rule/);
+  assert.match(f.body.systemInstruction.parts[0].text, /^You look at one browser tab[\s\S]*in this order: \{"facts"[\s\S]*Instructions for this page:\nPR rule/);
   step('Gemini for tabs returns one sentence and a status as JSON, with the URL rule');
 
   // Rename keeps the group's instructions.

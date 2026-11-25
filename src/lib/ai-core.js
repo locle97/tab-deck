@@ -54,14 +54,38 @@ export function groupKey(name) {
 }
 
 /** The instructions that apply to a summary: general first, then the group's own, then matching URL rules. */
-export function instructionsFor(settings, groupName, url) {
-  const parts = [];
-  const g = settings.general?.trim();
-  if (g) parts.push(g);
+/**
+ * The detailed instructions for one summary. Only one set is used, the most specific one:
+ * the most specific matching page rule, else the group's, else the general ones, else the built-in default
+ * (source 'default', text ''). They replace each other; they are never stacked.
+ * The base prompt (JSON reply in the order facts, summary, status) is always used on top.
+ */
+export function pickInstructions(settings, groupName, url) {
+  if (url) {
+    const r = mostSpecificRule(settings.rules, url);
+    if (r) return { text: r.instructions, source: 'rule', pattern: r.pattern };
+  }
   const own = groupName != null ? settings.groups?.[groupKey(groupName)]?.trim() : '';
-  if (own) parts.push(own);
-  if (url) for (const r of rulesFor(settings.rules, url)) parts.push(r.instructions);
-  return parts.join('\n');
+  if (own) return { text: own, source: 'group' };
+  const g = settings.general?.trim();
+  if (g) return { text: g, source: 'general' };
+  return { text: '', source: 'default' };
+}
+/**
+ * Of the rules matching a URL, the most specific: a page pattern beats a whole site, and a longer
+ * pattern (not counting * wildcards) beats a shorter one. Ties go to the rule higher in the list.
+ */
+export function mostSpecificRule(rules, url) {
+  let best = null, bestScore = -1;
+  for (const r of rulesFor(rules, url)) {
+    const m = compilePattern(r.pattern);
+    const score = (m.kind === 'site' ? 0 : 100000) + r.pattern.replace(/\*/g, '').length;
+    if (score > bestScore) { best = r; bestScore = score; }
+  }
+  return best;
+}
+export function instructionsFor(settings, groupName, url) {
+  return pickInstructions(settings, groupName, url).text;
 }
 
 /* ---------- URL rules ---------- */
@@ -258,7 +282,7 @@ export function userInstructionBlock(instructions) {
 const STATUS_GUIDE = STATUS_ORDER.map(k => `"${k}" (${STATUSES[k].label}): ${STATUSES[k].hint}`).join('\n');
 
 /** Bump when the tab prompt or schema changes, so saved summaries are redone with the new one. */
-export const PROMPT_VERSION = 3;
+export const PROMPT_VERSION = 4;
 
 // "facts" comes first on purpose: the model writes down the page's own state before it summarizes,
 // then picks the status, so the summary and the status are drawn from the same facts.
@@ -272,19 +296,73 @@ export const INSIGHT_SCHEMA = {
   required: ['facts', 'summary', 'status'],
 };
 
-/** Prompt for one tab: the page's state, a one-sentence summary, and a status that agrees with both, as JSON. */
-export function tabPrompt({ title, url, text, instructions, lang = 'en' }) {
-  const system = `You look at one browser tab for someone keeping track of many open tabs. ` +
+/** The shape of a detailed instruction. Rules, groups and general instructions are written in it. */
+export const INSTRUCTION_TEMPLATE = `This page is: …
+Facts: …
+Summary: …
+Status:
+- Needs you when …
+- In progress when …
+- Waiting when …
+- Done when …
+- Reference when …`;
+
+/** Used when no page rule, group or general instructions apply. Same shape as the template. */
+export const DEFAULT_TAB_INSTRUCTIONS = `This page is: any web page.
+Facts: the page's own current state in a few words, copied from what the page shows (for example "Merged", "Open · review requested from you", "Draft · 2 checks failing", "Order delivered"). Trust the "Page state:" line and the page's status areas over older comments or the description. Empty if the page has no state.
+Summary: what this page is and, if there is a task, where it stands.
+Status:
+- Needs you when you have to do something: review, reply, approve, fix or finish.
+- In progress when it is being worked on or running: a build, a draft, an agent.
+- Waiting when it is blocked on someone or something else.
+- Done when it is finished: merged, closed, resolved, sent, completed.
+- Reference when it is something to read or look up, with no task.
+A merged or closed pull request is Done; one waiting on your review or changes is Needs you; one waiting on others' review or CI is Waiting.`;
+
+/** The fixed part of every tab prompt: the reply format. Detailed instructions go after it. */
+export function baseTabPrompt(lang = 'en') {
+  return `You look at one browser tab for someone keeping track of many open tabs. ` +
     `Reply with JSON only, in this order: {"facts": "...", "summary": "...", "status": "..."}.\n` +
-    `"facts": the page's own current state in a few words, copied from what the page shows (for example "Merged", "Open · review requested from you", "Draft · 2 checks failing", "Closed", "Order delivered"). ` +
-    `Trust the "Page state:" line and the page's status areas over older comments or the description. Empty if the page has no state.\n` +
-    `"summary": ONE short sentence (at most 25 words) saying what this page is and, if there is a task, where it stands. It must agree with "facts". No preamble, no Markdown.\n` +
-    `"status": one of the values below. It must agree with "facts" and "summary" (a merged or closed pull request is "done"; one waiting on your review or changes is "action"; one waiting on others' review or CI is "waiting").\n${STATUS_GUIDE}\n"unknown": none of these is clear.\n` +
-    `Write "facts" and "summary" in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
-    userInstructionBlock(instructions);
+    `"facts": the page's current state in a few words, copied from the page. Empty if it has none.\n` +
+    `"summary": ONE short sentence (at most 25 words). No preamble, no Markdown. It must agree with "facts".\n` +
+    `"status": one of the values below. It must agree with "facts" and "summary".\n${STATUS_GUIDE}\n"unknown": none of these is clear.\n` +
+    `Follow the instructions for this page on what to put in each field. ` +
+    `Write "facts" and "summary" in the language with code "${lang}" unless those instructions ask otherwise. ${INJECTION_GUARD}`;
+}
+
+/** The detailed part: the user's instructions for this page, or the default ones. */
+export function tabInstructionBlock(instructions) {
+  return `Instructions for this page:\n${String(instructions || '').trim() || DEFAULT_TAB_INSTRUCTIONS}`;
+}
+
+export function tabPrompt({ title, url, text, instructions, lang = 'en' }) {
+  const system = `${baseTabPrompt(lang)}\n\n${tabInstructionBlock(instructions)}`;
   const body = text ? clip(text, 60000) : '(The page text could not be read. Work from the title and URL only.)';
   const user = `Title: ${title}\nURL: ${url}\n<page>\n${body}\n</page>`;
   return { system, user };
+}
+
+/** Asks the AI to fill in INSTRUCTION_TEMPLATE for pages matching a rule pattern, from one example page. */
+export function draftPrompt({ pattern, title = '', url = '', text = '', lang = 'en', max = 20000 }) {
+  const system = `You help someone write instructions for an AI that summarizes their open browser tabs. ` +
+    `For every tab, that AI replies with "facts" (the page's current state, copied from the page), "summary" (one sentence) and "status" ` +
+    `(${STATUS_ORDER.map(k => STATUSES[k].label).join(', ')}). ` +
+    `Write instructions for pages whose address matches the pattern, using the example page to see what such pages contain. ` +
+    `Fill in this template, keep its labels and lines, and be specific to this kind of page: which state to copy into Facts, ` +
+    `what the summary should mention, and when each status applies. Keep each line short. ` +
+    `Reply with the filled-in template only: plain text, no Markdown, no preamble. Write it in the language with code "${lang}". ${INJECTION_GUARD}\n\n` +
+    `Template:\n${INSTRUCTION_TEMPLATE}\n\nThe default instructions, for reference:\n${DEFAULT_TAB_INSTRUCTIONS}`;
+  const body = text ? headTail(text, max) : '(No page text. Work from the pattern, title and address.)';
+  const user = `Pattern: ${pattern}\nExample page title: ${title || '(none)'}\nExample address: ${url || '(none)'}\n<page>\n${body}\n</page>`;
+  return { system, user };
+}
+
+/** Cleans a drafted instruction: no code fences or preamble, within the length limit. */
+export function cleanDraft(text) {
+  let t = String(text || '').replace(/^\s*```[a-z]*\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  const i = t.search(/^This page is:/im);
+  if (i > 0) t = t.slice(i);
+  return clip(t, MAX_INSTRUCTIONS);
 }
 
 /** Keep the start and the end of a long text (state often sits at the end of a page, like a PR's merge box). */
