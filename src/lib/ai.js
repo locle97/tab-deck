@@ -1,16 +1,20 @@
-// AI summaries: settings, page text extraction, the on-device engine (Chrome's built-in
-// Summarizer API, Gemini Nano) and the optional cloud engine (Gemini API with the user's key).
-// Runs in the Tab Desk page only: the Summarizer API isn't available in service workers.
+// AI summaries: settings, page text extraction, saved tab insights (one-sentence summary + status),
+// the on-device engines (Chrome's built-in Prompt API, falling back to the Summarizer API; both Gemini Nano)
+// and the optional cloud engine (Gemini API with the user's key).
+// Runs in the Tab Desk page only: the built-in AI APIs aren't available in service workers.
 
 import {
-  DEFAULT_SETTINGS, normalizeSettings, instructionsFor, chooseEngine, cleanText, chunkText, langCode,
-  isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
-  cacheKey, fnv, pruneCache, ON_DEVICE_LANGS, MAX_GROUP_TABS, MAX_LOCAL_GROUP_TABS,
+  DEFAULT_SETTINGS, normalizeSettings, instructionsFor, chooseEngine, cleanText, langCode,
+  isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, userInstructionBlock,
+  cacheKey, fnv, pruneCache, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
+  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX,
 } from './ai-core.js';
 
 const SETTINGS_KEY = 'aiSettings';
 const API_KEY = 'aiGeminiKey';
 const CACHE_KEY = 'aiCache';
+const INSIGHTS_KEY = 'aiTabInsights';
+const GROUP_INSIGHTS_KEY = 'aiGroupInsights';
 export const PAGE_ORIGINS = ['<all_urls>'];
 
 export class AiError extends Error {
@@ -105,108 +109,184 @@ export async function extractTab(tab, { access }) {
   }
 }
 
-/* ---------- cache ---------- */
+/* ---------- saved insights ---------- */
+// Tab insights are keyed by URL (without #hash) so a summary shows again for the same page after a
+// restart. Group insights are keyed by group name, like group instructions.
 
-let memCache = null;
-async function loadCache() {
-  if (!memCache) memCache = (await chrome.storage.local.get(CACHE_KEY))[CACHE_KEY] || {};
-  return memCache;
-}
-async function cacheGet(key) { return (await loadCache())[key] || null; }
-async function cachePut(key, value) {
-  const c = await loadCache();
-  c[key] = { ...value, at: Date.now() };
-  memCache = pruneCache(c);
-  await chrome.storage.local.set({ [CACHE_KEY]: memCache });
-}
-export async function clearCache() { memCache = {}; await chrome.storage.local.remove(CACHE_KEY); }
-export async function cacheSize() { return Object.keys(await loadCache()).length; }
+let insights = null, groupInsights = null;
+const listeners = new Set();
+export function onInsightsChanged(cb) { listeners.add(cb); }
+const emit = () => listeners.forEach(cb => { try { cb(); } catch {} });
 
-/* ---------- on-device engine ---------- */
+export async function loadInsights() {
+  if (!insights) {
+    const r = await chrome.storage.local.get([INSIGHTS_KEY, GROUP_INSIGHTS_KEY]);
+    insights = r[INSIGHTS_KEY] || {};
+    groupInsights = r[GROUP_INSIGHTS_KEY] || {};
+  }
+  return { insights, groupInsights };
+}
+export const tabInsight = url => insights?.[insightKey(url)] || null;
+export const groupInsight = name => groupInsights?.[groupKey(name)] || null;
+
+// Write right away (a page can close at any moment), but never more than one write at a time.
+let saving = false, dirty = false;
+async function scheduleSave() {
+  if (saving) { dirty = true; return; }
+  saving = true;
+  try {
+    do {
+      dirty = false;
+      insights = pruneCache(insights, Date.now(), INSIGHT_TTL, INSIGHT_MAX);
+      await chrome.storage.local.set({ [INSIGHTS_KEY]: insights, [GROUP_INSIGHTS_KEY]: groupInsights });
+    } while (dirty);
+  } finally { saving = false; }
+}
+function putInsight(url, data) {
+  const k = insightKey(url);
+  const prev = insights[k] || {};
+  insights[k] = { ...prev, ...data, at: Date.now() };
+  scheduleSave();
+  emit();
+  return insights[k];
+}
+/** Set (or clear, with null) the status of a page by hand. A hand-set status wins over the AI's. */
+export async function setManualStatus(url, status) {
+  await loadInsights();
+  const k = insightKey(url);
+  const prev = insights[k] || { at: Date.now() };
+  insights[k] = { ...prev, manual: normalizeStatus(status) || undefined };
+  if (!insights[k].manual) delete insights[k].manual;
+  scheduleSave();
+  emit();
+}
+export async function clearGroupInsight(name) {
+  await loadInsights();
+  delete groupInsights[groupKey(name)];
+  scheduleSave();
+  emit();
+}
+export async function clearInsights() {
+  insights = {}; groupInsights = {};
+  await chrome.storage.local.remove([INSIGHTS_KEY, GROUP_INSIGHTS_KEY, CACHE_KEY]);
+  emit();
+}
+export async function insightCount() { await loadInsights(); return Object.keys(insights).length; }
+
+/* ---------- on-device engines ---------- */
 
 const uiLang = () => langCode(chrome.i18n?.getUILanguage?.() || navigator.language) || 'en';
 const localOut = () => (ON_DEVICE_LANGS.includes(uiLang()) ? uiLang() : 'en');
+const lmIO = () => ({ expectedInputs: [{ type: 'text', languages: ['en', localOut()].filter((v, i, a) => a.indexOf(v) === i) }], expectedOutputs: [{ type: 'text', languages: [localOut()] }] });
 
-function localOptions({ type, length, lang, sharedContext }) {
-  const o = { type, format: 'markdown', length, outputLanguage: localOut() };
+function sumOptions({ type = 'tldr', length = 'short', lang, sharedContext } = {}) {
+  const o = { type, format: 'plain-text', length, outputLanguage: localOut() };
   if (lang && ON_DEVICE_LANGS.includes(lang)) o.expectedInputLanguages = [lang];
   if (sharedContext) o.sharedContext = sharedContext;
   return o;
 }
 
-export async function localAvailability(opts = { type: 'key-points', format: 'markdown', length: 'short', outputLanguage: localOut() }) {
+async function lmAvailability() {
+  if (!('LanguageModel' in self)) return 'unavailable';
+  try { return await self.LanguageModel.availability(lmIO()); } catch { return 'unavailable'; }
+}
+async function sumAvailability() {
   if (!('Summarizer' in self)) return 'unavailable';
-  try { return await self.Summarizer.availability(opts); } catch { return 'unavailable'; }
+  try { return await self.Summarizer.availability(sumOptions()); } catch { return 'unavailable'; }
+}
+const RANK = { available: 0, downloading: 1, downloadable: 2, unavailable: 3 };
+
+/** Best on-device option. Prefers the Prompt API, which can also judge a status. */
+export async function localAvailability() {
+  const [lm, sum] = await Promise.all([lmAvailability(), sumAvailability()]);
+  const api = lm !== 'unavailable' && RANK[lm] <= RANK[sum] ? 'prompt' : sum !== 'unavailable' ? 'summarizer' : lm !== 'unavailable' ? 'prompt' : null;
+  return { state: api === 'prompt' ? lm : api === 'summarizer' ? sum : 'unavailable', api };
 }
 
-const pool = new Map();
+const gestureError = e => (e?.name === 'NotAllowedError'
+  ? new AiError('Chrome needs a click to start downloading the on-device model. Press the summarize button again.', 'gesture')
+  : new AiError(`The on-device model couldn’t start: ${e?.message || e}`, 'local'));
+
+let baseSession = null; // Prompt API session with the tab system prompt; cloned for each tab
 let idleTimer = null;
-function touchPool() {
+function touchIdle() {
   clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => { for (const s of pool.values()) s.then(x => x.destroy?.()).catch(() => {}); pool.clear(); }, 5 * 60 * 1000);
+  idleTimer = setTimeout(dropSessions, 5 * 60 * 1000);
 }
-addEventListener('pagehide', () => { for (const s of pool.values()) s.then(x => x.destroy?.()).catch(() => {}); pool.clear(); });
+function dropSessions() {
+  baseSession?.then(s => s.destroy?.()).catch(() => {});
+  baseSession = null;
+  for (const s of sumPool.values()) s.then(x => x.destroy?.()).catch(() => {});
+  sumPool.clear();
+}
+addEventListener('pagehide', dropSessions);
 
-async function getSummarizer(opts, onProgress) {
-  const k = JSON.stringify(opts);
-  touchPool();
-  if (!pool.has(k)) {
-    const p = self.Summarizer.create({
-      ...opts,
+function getBaseSession(onProgress) {
+  touchIdle();
+  if (!baseSession) {
+    const { system } = tabPrompt({ title: '', url: '', text: '', instructions: '', lang: localOut() });
+    baseSession = self.LanguageModel.create({
+      ...lmIO(),
+      initialPrompts: [{ role: 'system', content: system }],
       monitor(m) { m.addEventListener('downloadprogress', e => onProgress?.(e.total ? e.loaded / e.total : e.loaded)); },
     });
-    pool.set(k, p);
-    p.catch(() => pool.delete(k));
+    baseSession.catch(() => { baseSession = null; });
   }
-  try {
-    return await pool.get(k);
-  } catch (e) {
-    if (e?.name === 'NotAllowedError') throw new AiError('Chrome needs a click to start downloading the on-device model. Press Summarize again.', 'gesture');
-    throw new AiError(`The on-device model couldn’t start: ${e?.message || e}`, 'local');
-  }
+  return baseSession.catch(e => { throw gestureError(e); });
 }
 
-async function streamLocal(s, text, context, signal, onChunk) {
-  let acc = '';
-  if (typeof s.summarizeStreaming !== 'function') {
-    acc = await s.summarize(text, { context, signal });
-    onChunk?.(acc);
-    return acc;
+const sumPool = new Map();
+function getSummarizer(opts, onProgress) {
+  touchIdle();
+  const k = JSON.stringify(opts);
+  if (!sumPool.has(k)) {
+    const p = self.Summarizer.create({ ...opts, monitor(m) { m.addEventListener('downloadprogress', e => onProgress?.(e.total ? e.loaded / e.total : e.loaded)); } });
+    sumPool.set(k, p);
+    p.catch(() => sumPool.delete(k));
   }
-  for await (const chunk of s.summarizeStreaming(text, { context, signal })) {
-    // Older Chrome builds sent the whole text so far; newer ones send deltas.
-    acc = chunk.startsWith(acc) && acc ? chunk : acc + chunk;
-    onChunk?.(acc);
-  }
-  return acc;
+  return sumPool.get(k).catch(e => { throw gestureError(e); });
 }
 
-async function fits(s, text) {
-  if (typeof s.measureInputUsage === 'function' && Number.isFinite(s.inputQuota)) {
-    try { return (await s.measureInputUsage(text)) <= s.inputQuota; } catch {}
+async function localInsight(page, instructions, { api, signal, onProgress }) {
+  const text = page.text ? page.text.slice(0, 6000) : '';
+  if (api === 'prompt') {
+    const base = await getBaseSession(onProgress);
+    const s = await base.clone({ signal });
+    try {
+      const user = `${userInstructionBlock(instructions).trim()}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
+      const out = await s.prompt(user, { responseConstraint: INSIGHT_SCHEMA, signal });
+      return parseInsight(out);
+    } finally { s.destroy?.(); }
   }
-  return text.length <= 4000;
+  const sum = await getSummarizer(sumOptions({ lang: page.lang, sharedContext: localContext('tab', { instructions }) }), onProgress);
+  const out = await sum.summarize(text || `${page.title}\n${page.url}`, { context: `Page title: ${page.title}`, signal });
+  return { summary: oneSentence(out), status: null };
 }
 
-/** Summarize text on-device, splitting long text and summarizing the parts first. */
-async function summarizeLocal(text, { type, length, lang, sharedContext, context, signal, onChunk, onProgress }) {
-  const s = await getSummarizer(localOptions({ type, length, lang, sharedContext }), onProgress);
-  if (await fits(s, text)) return { text: await streamLocal(s, text, context, signal, onChunk), partial: false };
-  const { chunks, truncated } = chunkText(text, 3000, 6);
-  const tl = await getSummarizer(localOptions({ type: 'tldr', length: 'short', lang, sharedContext }), onProgress);
-  const parts = [];
-  for (let i = 0; i < chunks.length; i++) {
-    if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
-    onChunk?.(`_Reading part ${i + 1} of ${chunks.length}…_`);
-    parts.push(await tl.summarize(chunks[i], { context, signal }));
+async function localGroupSentence(name, lines, instructions, { api, signal, onProgress, onChunk }) {
+  const input = lines.join('\n').slice(0, 6000);
+  if (api === 'prompt') {
+    const s = await self.LanguageModel.create({
+      ...lmIO(),
+      initialPrompts: [{ role: 'system', content: groupPrompt({ name, tabs: [], instructions, lang: localOut() }).system }],
+      monitor(m) { m.addEventListener('downloadprogress', e => onProgress?.(e.total ? e.loaded / e.total : e.loaded)); },
+    }).catch(e => { throw gestureError(e); });
+    try {
+      const out = await s.prompt(`Tabs in "${name}":\n${input}`, { signal });
+      onChunk?.(out);
+      return out;
+    } finally { s.destroy?.(); }
   }
-  return { text: await streamLocal(s, parts.join('\n\n'), context, signal, onChunk), partial: truncated };
+  const sum = await getSummarizer(sumOptions({ sharedContext: localContext('group', { groupName: name, instructions }) }), onProgress);
+  const out = await sum.summarize(input, { context: `Group name: ${name}`, signal });
+  onChunk?.(out);
+  return out;
 }
 
 /* ---------- cloud engine ---------- */
 
-async function streamGemini({ key, model, system, user, signal, onChunk }, retried = false) {
-  const { url, body } = geminiRequest({ model, system, user });
+async function streamGemini({ key, model, system, user, signal, onChunk, json = false }, retried = false) {
+  const { url, body } = geminiRequest({ model, system, user, json });
   let res;
   try {
     res = await fetch(url, {
@@ -223,7 +303,7 @@ async function streamGemini({ key, model, system, user, signal, onChunk }, retri
     const err = geminiError(res.status, await res.text().catch(() => ''));
     if (err.code === 'rate' && !retried && err.retry > 0 && err.retry <= 10) {
       await new Promise(r => setTimeout(r, err.retry * 1000));
-      return streamGemini({ key, model, system, user, signal, onChunk }, true);
+      return streamGemini({ key, model, system, user, signal, onChunk, json }, true);
     }
     throw new AiError(err.message, err.code);
   }
@@ -259,127 +339,102 @@ export async function testApiKey(key) {
 /** What each engine can do right now. */
 export async function engineState() {
   const [settings, key, local] = await Promise.all([getSettings(), getApiKey(), localAvailability()]);
-  return { settings, hasKey: !!key, local };
+  return { settings, hasKey: !!key, local: local.state, localApi: local.api };
 }
 
 function pickEngine(kind, settings, local, hasKey) {
   const e = chooseEngine({ kind, setting: settings.engine, local, hasKey });
   if (e) return e;
   if (settings.engine === 'cloud') throw new AiError('Add a Gemini API key in AI settings to use the cloud engine.', 'no-engine');
-  if (settings.engine === 'local') throw new AiError('On-device AI isn’t available on this device or for this language. Add a Gemini API key in AI settings to use the cloud instead.', 'no-engine');
+  if (settings.engine === 'local') throw new AiError('On-device AI isn’t available on this device. Add a Gemini API key in AI settings to use the cloud instead.', 'no-engine');
   throw new AiError('On-device AI isn’t available here (it needs desktop Chrome 138+ with enough memory and disk). Add a Gemini API key in AI settings to use Gemini instead.', 'no-engine');
 }
 
-/**
- * Which engine a summary would use, so the page can ask for cloud consent before starting.
- * Returns 'local' | 'cloud' (throws AiError when neither works).
- */
+/** Which engine a summary would use. Returns 'local' | 'cloud' (throws AiError when neither works). */
 export async function plannedEngine(kind) {
   const { settings, hasKey, local } = await engineState();
   return pickEngine(kind, settings, local, hasKey);
 }
 
 /**
- * Summarize one tab.
- * opts: { groupName, force, signal, onChunk(text), onProgress(fraction), onStatus(text), access }
- * Returns { text, engine, at, readable, reason, cached, partial }.
+ * Summarize one tab in one sentence and judge its status. The result is saved by URL.
+ * opts: { groupName, force, signal, onProgress(fraction), access, engine? }
+ * Skips the model when the page text and instructions haven't changed since the last summary.
+ * Returns the saved insight: { summary, status, manual?, engine, at, reason, readable }.
  */
 export async function summarizeTab(tab, opts = {}) {
-  const { settings, hasKey, local } = await engineState();
-  const engine = pickEngine('tab', settings, local, hasKey);
-  return summarizeTabWith(engine, tab, settings, opts);
-}
-
-async function summarizeTabWith(engine, tab, settings, opts, type) {
-  const { groupName, force, signal, onChunk, onProgress } = opts;
+  await loadInsights();
+  const st = await engineState();
+  const engine = opts.engine || pickEngine('tab', st.settings, st.local, st.hasKey);
   const page = await extractTab(tab, { access: opts.access });
-  const instructions = instructionsFor(settings, groupName);
-  const kind = type || 'key-points';
-  const key = cacheKey(['tab', engine, engine === 'cloud' ? settings.model : '', kind, settings.length, instructions, page.url, fnv(page.text)]);
-  if (!force) {
-    const hit = await cacheGet(key);
-    if (hit) { onChunk?.(hit.text); return { ...hit, readable: page.readable, reason: page.reason, cached: true }; }
-  }
-  let text, partial = false;
+  const instructions = instructionsFor(st.settings, opts.groupName, page.url);
+  const sig = cacheKey([engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, fnv(page.text), page.title]);
+  const prev = tabInsight(page.url);
+  if (!opts.force && prev?.sig === sig && prev.summary) return putInsight(page.url, {});
+  let r;
   if (engine === 'cloud') {
-    const apiKey = await getApiKey();
-    const { system, user } = tabPrompt({ ...page, length: settings.length, instructions, lang: uiLang() });
-    text = await streamGemini({ key: apiKey, model: settings.model, system, user, signal, onChunk });
+    const { system, user } = tabPrompt({ ...page, instructions, lang: uiLang() });
+    r = parseInsight(await streamGemini({ key: await getApiKey(), model: st.settings.model, system, user, json: true, signal: opts.signal }));
   } else {
-    const input = page.text || `${page.title}\n${page.url}`;
-    const r = await summarizeLocal(input, {
-      type: kind, length: settings.length, lang: page.lang,
-      sharedContext: localContext('tab', { instructions }),
-      context: `Page title: ${page.title}`, signal, onChunk, onProgress,
-    });
-    text = r.text; partial = r.partial;
+    r = await localInsight(page, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress });
   }
-  const out = { text: text.trim(), engine, partial };
-  await cachePut(key, out);
-  return { ...out, at: Date.now(), readable: page.readable, reason: page.reason, cached: false };
+  if (!r.summary) throw new AiError('The AI returned an empty summary.', 'empty');
+  return putInsight(page.url, { summary: r.summary, status: r.status, engine, sig, reason: page.reason, readable: page.readable, title: page.title });
 }
 
 /**
- * Summarize a group: "what is this group about".
- * group: { name, tabs: chrome.tabs.Tab[] }
- * opts as summarizeTab, plus onStatus(text) for "Reading 3 of 9 tabs…".
- * Returns { text, engine, at, cached, unreadable: [{title, url, reason}], skipped }.
+ * One sentence about what a group is about. Uses the saved tab summaries where there are any.
+ * group: { name, tabs }. opts: { force, signal, onChunk, onProgress, onStatus, access }
+ * Returns the saved group insight: { summary, engine, at, unreadable, skipped }.
  */
 export async function summarizeGroup(group, opts = {}) {
   const { force, signal, onChunk, onProgress, onStatus } = opts;
-  const { settings, hasKey, local } = await engineState();
-  const engine = pickEngine('group', settings, local, hasKey);
-  const instructions = instructionsFor(settings, group.name);
-  const cap = engine === 'cloud' ? MAX_GROUP_TABS : MAX_LOCAL_GROUP_TABS;
+  await loadInsights();
+  const st = await engineState();
+  const engine = pickEngine('group', st.settings, st.local, st.hasKey);
+  const instructions = instructionsFor(st.settings, group.name);
   const sorted = [...group.tabs].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
-  const picked = sorted.slice(0, cap);
+  const picked = sorted.slice(0, MAX_GROUP_TABS);
   const skipped = sorted.length - picked.length;
 
   const pages = [];
   for (let i = 0; i < picked.length; i++) {
     if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
+    const t = picked[i];
+    const ins = tabInsight(t.url || t.pendingUrl);
+    if (ins?.summary && engine === 'local') { pages.push({ title: t.title, url: t.url, summary: ins.summary, readable: true }); continue; }
     onStatus?.(`Reading tab ${i + 1} of ${picked.length}…`);
-    pages.push(await extractTab(picked[i], { access: opts.access }));
+    const p = await extractTab(t, { access: opts.access });
+    pages.push({ ...p, summary: ins?.summary || '' });
   }
-  const unreadable = pages.filter(p => !p.readable).map(p => ({ title: p.title, url: p.url, reason: p.reason }));
-  const key = cacheKey(['group', engine, engine === 'cloud' ? settings.model : '', settings.length, instructions, group.name, pages.map(p => [p.url, fnv(p.text)])]);
-  if (!force) {
-    const hit = await cacheGet(key);
-    if (hit) { onChunk?.(hit.text); return { ...hit, cached: true, unreadable, skipped }; }
-  }
+  const unreadable = pages.filter(p => !p.readable && !p.summary).map(p => ({ title: p.title, url: p.url, reason: p.reason }));
+  const sig = cacheKey(['group', engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, group.name, pages.map(p => [p.url, p.summary, fnv(p.text || '')])]);
+  const prev = groupInsight(group.name);
+  if (!force && prev?.sig === sig && prev.summary) { onChunk?.(prev.summary); return prev; }
 
   let text;
   if (engine === 'cloud') {
     onStatus?.('Asking Gemini…');
-    const apiKey = await getApiKey();
     const { system, user } = groupPrompt({ name: group.name, tabs: pages, instructions, lang: uiLang() });
-    text = await streamGemini({ key: apiKey, model: settings.model, system, user, signal, onChunk });
+    text = await streamGemini({ key: await getApiKey(), model: st.settings.model, system, user, signal, onChunk });
   } else {
-    // Gemini Nano works best on one document at a time: summarize each tab briefly, then summarize those.
-    const lines = [];
-    for (let i = 0; i < picked.length; i++) {
-      if (signal?.aborted) throw new DOMException('Stopped', 'AbortError');
-      onStatus?.(`Summarizing tab ${i + 1} of ${picked.length} on this device…`);
-      const p = pages[i];
-      if (!p.readable) { lines.push(`- ${p.title} (${p.url})`); continue; }
-      const r = await summarizeTabWith('local', picked[i], { ...settings, length: 'short' }, { groupName: group.name, signal, onProgress, access: opts.access }, 'tldr');
-      lines.push(`- ${p.title}: ${r.text.replace(/\s+/g, ' ')}`);
-    }
-    onStatus?.('Putting it together…');
-    const r = await summarizeLocal(lines.join('\n'), {
-      type: 'tldr', length: 'medium', lang: '',
-      sharedContext: localContext('group', { groupName: group.name, instructions }),
-      context: `Group name: ${group.name}`, signal, onChunk, onProgress,
-    });
-    text = r.text;
+    onStatus?.('Summarizing on this device…');
+    const lines = pages.map(p => `- ${p.title}${p.summary ? `: ${p.summary}` : ''}`);
+    text = await localGroupSentence(group.name, lines, instructions, { api: st.localApi, signal, onProgress, onChunk });
   }
-  const out = { text: text.trim(), engine };
-  await cachePut(key, out);
-  return { ...out, at: Date.now(), cached: false, unreadable, skipped };
+  const summary = oneSentence(text, 300);
+  if (!summary) throw new AiError('The AI returned an empty summary.', 'empty');
+  groupInsights[groupKey(group.name)] = { summary, engine, sig, unreadable, skipped, at: Date.now() };
+  scheduleSave();
+  emit();
+  return groupInsights[groupKey(group.name)];
 }
 
 /** Start the on-device model download. Call from a click. */
 export async function downloadLocalModel(onProgress) {
-  const s = await getSummarizer(localOptions({ type: 'key-points', length: 'short' }), onProgress);
-  return !!s;
+  const { api } = await localAvailability();
+  if (api === 'prompt') await getBaseSession(onProgress);
+  else if (api === 'summarizer') await getSummarizer(sumOptions(), onProgress);
+  else throw new AiError('On-device AI isn’t available on this device.', 'local');
+  return true;
 }

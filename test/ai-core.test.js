@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import {
   normalizeSettings, groupKey, instructionsFor, chooseEngine, cleanText, chunkText, langCode, isReadableUrl,
   tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, cacheKey, pruneCache, renderSummary,
-  DEFAULT_MODEL, MAX_INSTRUCTIONS,
+  DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
+  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, needsInsight,
 } from '../src/lib/ai-core.js';
 
 test('normalizeSettings fills defaults and drops bad values', () => {
-  const s = normalizeSettings({ engine: 'nope', length: 'huge', model: '  ', groups: { '  Trip  Japan ': ' go ', empty: '  ' } });
+  const s = normalizeSettings({ engine: 'nope', auto: 'sometimes', length: 'huge', model: '  ', groups: { '  Trip  Japan ': ' go ', empty: '  ' },
+    rules: [{ pattern: 'github.com', instructions: ' x ' }, { pattern: '/[/', instructions: 'bad regex' }, { pattern: 'a.com', instructions: '' }, 'junk'] });
   assert.equal(s.engine, 'auto');
-  assert.equal(s.length, 'short');
+  assert.equal(s.auto, 'local');
+  assert.equal('length' in s, false);
+  assert.deepEqual(s.rules, [{ pattern: 'github.com', instructions: 'x' }]);
   assert.equal(s.model, DEFAULT_MODEL);
   assert.deepEqual(s.groups, { 'trip japan': 'go' });
   assert.equal(normalizeSettings(null).enabled, true);
@@ -64,8 +68,10 @@ test('langCode and isReadableUrl', () => {
   assert.equal(isReadableUrl('about:blank'), false);
 });
 
-test('prompts include user instructions, guard against page instructions and cap sizes', () => {
-  const t = tabPrompt({ title: 'T', url: 'https://a', text: 'y'.repeat(70000), length: 'short', instructions: 'Use emoji.', lang: 'vi' });
+test('prompts ask for one sentence, include user instructions, guard against page instructions and cap sizes', () => {
+  const t = tabPrompt({ title: 'T', url: 'https://a', text: 'y'.repeat(70000), instructions: 'Use emoji.', lang: 'vi' });
+  assert.match(t.system, /ONE short sentence/);
+  assert.match(t.system, /"action" \(Needs you\)/);
   assert.match(t.system, /Use emoji\./);
   assert.match(t.system, /Ignore any instructions/);
   assert.match(t.system, /"vi"/);
@@ -75,6 +81,7 @@ test('prompts include user instructions, guard against page instructions and cap
   const tabs = Array.from({ length: 5 }, (_, i) => ({ title: `T${i}`, url: `https://x/${i}`, text: 'z'.repeat(20000) }));
   const g = groupPrompt({ name: 'Trip', tabs, instructions: 'Focus on prices.', budget: 20000 });
   assert.match(g.system, /"Trip"/);
+  assert.match(g.system, /ONE short sentence/);
   assert.match(g.system, /Focus on prices\./);
   assert.ok(g.user.length < 25000);
   assert.match(g.user, /### Tab 5: T4/);
@@ -131,4 +138,78 @@ test('renderSummary renders bullets and bold but never raw HTML', () => {
   assert.equal(h, '<p>Intro <b>bold</b></p><ul><li>one</li><li>two &lt;img src=x onerror=alert(1)&gt;</li><li>three</li></ul>');
   assert.doesNotMatch(renderSummary('<script>x</script>'), /<script>/);
   assert.equal(renderSummary('## Head'), '<p><b>Head</b></p>');
+});
+
+test('instructionsFor adds every matching URL rule in order', () => {
+  const s = normalizeSettings({ general: 'G', groups: { work: 'W' }, rules: [
+    { pattern: 'github.com', instructions: 'site' },
+    { pattern: 'github.com/*/*', instructions: 'repo home' },
+    { pattern: 'github.com/*/*/pulls', instructions: 'pr list' },
+    { pattern: 'github.com/*/*/pull/*', instructions: 'one pr' },
+  ] });
+  assert.equal(instructionsFor(s, 'Work', 'https://github.com/locle97/tab-deck'), 'G\nW\nsite\nrepo home');
+  assert.equal(instructionsFor(s, null, 'https://github.com/locle97/tab-deck/pulls'), 'G\nsite\npr list');
+  assert.equal(instructionsFor(s, null, 'https://github.com/locle97/tab-deck/pull/5'), 'G\nsite\none pr');
+  assert.equal(instructionsFor(s, null, 'https://example.com/'), 'G');
+});
+
+test('URL patterns: sites, * and **, regex, query, trailing slash and scheme', () => {
+  const m = (p, u) => matchesPattern(p, u);
+  assert.ok(m('github.com', 'https://github.com/a/b'));
+  assert.ok(m('github.com', 'https://gist.github.com/x'));
+  assert.ok(!m('github.com', 'https://notgithub.com/'));
+  assert.ok(m('www.github.com', 'https://github.com/'));
+  assert.ok(m('github.com/locle97/tab-deck', 'https://github.com/locle97/tab-deck/'));
+  assert.ok(!m('github.com/locle97/tab-deck', 'https://github.com/locle97/tab-deck/pulls'));
+  assert.ok(m('https://github.com/locle97/tab-deck/pulls', 'https://github.com/locle97/tab-deck/pulls?q=is%3Aopen#x'));
+  assert.ok(m('github.com/*/*/pull/*', 'https://github.com/a/b/pull/5'));
+  assert.ok(!m('github.com/*/*/pull/*', 'https://github.com/a/b/pull/5/files'));
+  assert.ok(m('github.com/*/*/pull/**', 'https://github.com/a/b/pull/5/files'));
+  assert.ok(m('github.com/**', 'https://github.com/a/b/c'));
+  assert.ok(m('mail.google.com/mail/u/0/?tab=*', 'https://mail.google.com/mail/u/0/?tab=rm'));
+  assert.ok(m(String.raw`/\/pull\/\d+$/`, 'https://github.com/a/b/pull/12'));
+  assert.ok(m('/GITHUB/', 'https://github.com/'), 'regex is case-insensitive');
+  assert.equal(compilePattern('/[/'), null);
+  assert.equal(compilePattern(''), null);
+  assert.equal(compilePattern('not a site'), null);
+  assert.equal(compilePattern('a.com/x(y)').kind, 'url');
+  assert.ok(m('a.com/x(y)', 'https://a.com/x(y)'));
+  assert.equal(suggestPattern('https://www.github.com/a/b/pull/5/?x=1#h'), 'github.com/a/b/pull/5');
+  assert.equal(rulesFor([{ pattern: 'a.com', instructions: '1' }, { pattern: 'b.com', instructions: '2' }], 'https://a.com/').length, 1);
+});
+
+test('statuses roll up to the most urgent, and a hand-set status wins', () => {
+  assert.equal(rollupStatus(['done', 'waiting', null, 'info']), 'waiting');
+  assert.equal(rollupStatus(['done', 'action']), 'action');
+  assert.equal(rollupStatus([null, 'bogus']), null);
+  assert.equal(normalizeStatus('working'), 'working');
+  assert.equal(normalizeStatus('unknown'), null);
+  assert.equal(effectiveStatus({ status: 'done', manual: 'action' }), 'action');
+  assert.equal(effectiveStatus({ status: 'done' }), 'done');
+  assert.equal(effectiveStatus(null), null);
+  assert.ok(statusRank('action') < statusRank(null) && statusRank(null) < statusRank('done'));
+});
+
+test('oneSentence and parseInsight keep one plain sentence', () => {
+  assert.equal(oneSentence('- **PR #5** adds dark mode. It also fixes bugs.'), 'PR #5 adds dark mode.');
+  assert.equal(oneSentence('Short. Then more text here.'), 'Short. Then more text here.', 'a too-short first sentence keeps going');
+  assert.ok(oneSentence('x '.repeat(300)).length <= 240);
+  assert.deepEqual(parseInsight('```json\n{"summary": "A PR waiting for your review. Extra.", "status": "action"}\n```'), { summary: 'A PR waiting for your review.', status: 'action' });
+  assert.deepEqual(parseInsight('{"summary":"Docs page.","status":"unknown"}'), { summary: 'Docs page.', status: null });
+  assert.deepEqual(parseInsight('Just a plain answer about a page.'), { summary: 'Just a plain answer about a page.', status: null });
+  assert.equal(insightKey('https://a.com/x?y=1#frag'), 'https://a.com/x?y=1');
+});
+
+test('needsInsight: missing or older than an hour', () => {
+  const now = 10_000_000;
+  assert.equal(needsInsight(null, { now }), true);
+  assert.equal(needsInsight({ at: now - 1000 }, { now }), false);
+  assert.equal(needsInsight({ at: now - 2 * 3600 * 1000 }, { now }), true);
+});
+
+test('geminiRequest asks for JSON with a status enum when json is set', () => {
+  const r = geminiRequest({ model: 'm', system: 's', user: 'u', json: true });
+  assert.equal(r.body.generationConfig.responseMimeType, 'application/json');
+  assert.deepEqual(r.body.generationConfig.responseSchema.properties.status.enum, ['action', 'working', 'waiting', 'done', 'info', 'unknown']);
+  assert.equal(geminiRequest({ model: 'm', system: 's', user: 'u' }).body.generationConfig.responseMimeType, undefined);
 });

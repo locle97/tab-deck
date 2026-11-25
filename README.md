@@ -17,11 +17,13 @@ A Chrome extension page for people who keep many tab groups open. It replaces sq
   - `Ctrl+M` moves a tab to another group, or to a new one if you type a name
   - type `>` to list commands (close duplicates, group Inbox by site, sleep other tabs)
 - **Cleanup.** A duplicate-tab cleaner, and one-click *Group by site* for the Inbox.
-- **AI summaries.** *Summarize* on a tab gives a few key points about the page; *Summarize* on a group says what the group is about.
-  - Runs on your device by default with Chrome's built-in Gemini Nano (Chrome 138+ on desktop, with enough memory and disk; Chrome downloads the model once, on your first click). Nothing leaves your computer.
-  - Optionally add your own Gemini API key in **AI summaries** (bottom of the sidebar) for better group summaries or when on-device AI isn't available. Before anything is sent to Google, Tab Desk asks once, and every summary is labeled *On-device* or *Gemini · cloud*.
-  - **Custom instructions:** general instructions for every summary (for example "Write in Vietnamese"), plus instructions for a specific group from the group's ⋯ menu. Group instructions are saved by group name, so they survive restarts, renames and restoring from Workspaces.
-  - Summaries are cached on this device for 7 days. Sleeping tabs aren't reloaded, and pages Chrome won't let extensions read are summarized from their title and address.
+- **AI summaries and statuses.** Every tab gets a one-sentence summary under its title, on the group page and on dashboard cards, plus a status: **Needs you**, **In progress**, **Waiting**, **Done** or **Reference**. Each group gets a one-sentence summary, and its card shows its most urgent tab status. *Most urgent first* on the dashboard puts groups that need you at the top.
+  - The AI picks the status. Click a status to set it yourself; a status you set wins until you choose *Let the AI decide*.
+  - *Summarize* on a group summarizes the group and each of its tabs. The sparkle on a tab summarizes that tab again. With *Summarize tabs automatically* on (the default), new and changed tabs are summarized in the background once the on-device model is ready.
+  - Runs on your device by default with Chrome's built-in Gemini Nano (Chrome 138+ on desktop, with enough memory and disk). Chrome downloads the model once, on your first click. Nothing leaves your computer. Statuses use Chrome's Prompt API; where only the Summarizer API is available, on-device summaries come without a status.
+  - Optionally add your own Gemini API key in **AI summaries** (bottom of the sidebar). Before anything is sent to Google, Tab Desk asks once, and summaries made by Gemini are marked *Gemini · cloud*.
+  - **Custom instructions:** general instructions for every summary (for example "Write in Vietnamese"), instructions for a group (from its ⋯ menu, saved by group name), and **instructions for sites and pages**. A rule matches a site (`github.com`), a page pattern on the address without `https://` (`*` is one part of the path, `**` is anything: `github.com/*/*` is a repo's home, `github.com/*/*/pulls` its pull request list, `github.com/*/*/pull/*` one pull request), or a `/regular expression/`. Every matching rule applies. A tab's status menu has *AI instructions for pages like this…* with the pattern filled in.
+  - Summaries are saved on this device by address, so they show again after a restart, and a page whose text hasn't changed isn't sent to the model again. Sleeping tabs aren't reloaded, and pages Chrome won't let extensions read are summarized from their title and address.
 
 Most actions can be undone from the toast that follows them.
 

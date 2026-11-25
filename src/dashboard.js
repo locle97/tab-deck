@@ -6,6 +6,7 @@ import {
 import * as A from './lib/actions.js';
 import { listWorkspaces, onWorkspacesChanged } from './lib/workspaces.js';
 import * as AIUI from './ai-ui.js';
+import { statusRank } from './lib/ai-core.js';
 
 const SELF_URL = chrome.runtime.getURL('dashboard.html');
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
@@ -59,6 +60,7 @@ async function refresh() {
   if (renaming || dragging != null) { deferred = true; return; }
   render();
   if (!$('#pal').hidden) renderPalette();
+  AIUI.noticeTabs(allTabs(model));
 }
 let refreshTimer;
 const scheduleRefresh = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 80); };
@@ -233,13 +235,13 @@ function tabRow(t, counts) {
   return `<li class="tab${selected.has(t.id) ? ' is-selected' : ''}" data-id="${t.id}">
     <input type="checkbox" id="sel-${t.id}" data-act="select" ${selected.has(t.id) ? 'checked' : ''} aria-label="Select ${esc(titleOf(t))}">
     ${fav(url)}
-    <div class="tab-text"><div class="tab-title"><span class="t">${esc(titleOf(t))}</span>${badges.join('')}</div><div class="tab-url">${urlHtml}</div></div>
+    <div class="tab-text"><div class="tab-title"><span class="t">${esc(titleOf(t))}</span>${AIUI.tabStatus(t)}${badges.join('')}</div><div class="tab-url">${urlHtml}</div>${AIUI.tabLine(t)}</div>
     <span class="tab-meta">${ago ? (ago === 'now' ? 'Now' : `${ago} ago`) : ''}</span>
     <div class="tab-actions">
       ${AIUI.tabSumButton(t)}
       <button class="icon-btn" data-act="move" type="button" title="Move to group" aria-label="Move to group">${ICON.move}</button>
       <button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close tab">${ICON.close}</button>
-    </div></li>${AIUI.tabSumRow(t)}`;
+    </div></li>`;
 }
 
 function bulkBar() {
@@ -270,7 +272,7 @@ function renderMain() {
       <div class="pane-title">
         <div class="eyebrow"><span class="bar"></span>${COLOR_NAMES[g.color]} group${model.windowCount > 1 ? ` · window ${g.window}` : ''}${g.collapsed ? ' · collapsed' : ''}</div>
         ${renaming ? `<input class="rename-input" id="renameInput" value="${esc(g.title)}" placeholder="Group name" aria-label="Group name">` : `<h1>${esc(g.name)}</h1>`}
-        <div class="pane-meta">${plural(g.tabs.length, 'tab')} · ${plural(sites, 'site')}${sleeping ? ` · ${sleeping} sleeping` : ''}</div>
+        <div class="pane-meta">${plural(g.tabs.length, 'tab')} · ${plural(sites, 'site')}${sleeping ? ` · ${sleeping} sleeping` : ''} ${AIUI.groupStatusBadge(g)}</div>
       </div>
       <div class="actions">
         <button class="btn ghost" data-act="rename" type="button">${ICON.pen} Rename</button>
@@ -281,7 +283,7 @@ function renderMain() {
         <button class="btn primary" data-act="save-close" type="button" title="Save this group as a workspace and close its tabs">${ICON.save} Save &amp; close</button>
       </div></div>`;
     h += bulkBar();
-    h += AIUI.groupSumCard(g);
+    h += AIUI.groupSumCard(g, { detail: true });
     h += `<ul class="tabs">${g.tabs.map(t => tabRow(t, counts)).join('')}</ul>`;
     h += hints();
   } else if (view.kind === 'workspaces') {
@@ -324,6 +326,13 @@ function renderMain() {
 }
 
 /* ---------- dashboard ---------- */
+// "Most urgent first": order cards by the most urgent tab status in each group (Needs you first).
+const URGENT_KEY = 'tabdesk.urgentFirst';
+let urgentFirst = (() => { try { return localStorage.getItem(URGENT_KEY) === '1'; } catch { return false; } })();
+function sortByUrgency(groups) {
+  return groups.map((g, i) => ({ g, i, r: statusRank(AIUI.groupStatus(g)) })).sort((a, b) => a.r - b.r || a.i - b.i).map(x => x.g);
+}
+
 /** The group's AI summary (or its instructions chip), between the facts line and the tab list. */
 const cardSummary = g => AIUI.groupSumCard(g);
 
@@ -331,9 +340,9 @@ function cardTab(t) {
   const url = t.url || t.pendingUrl || '';
   const sleeping = t.discarded || t.frozen;
   return `<li class="card-tab${t.active ? ' is-active' : ''}${sleeping ? ' is-sleeping' : ''}" data-id="${t.id}">
-    <button class="card-tab-btn" data-act="activate" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="t">${esc(titleOf(t))}</span>
+    ${AIUI.tabStatus(t, { compact: true })}<button class="card-tab-btn" data-act="activate" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="card-tab-text"><span class="t">${esc(titleOf(t))}</span>${AIUI.tabLine(t)}</span>
     ${t.audible ? `<span class="card-ico" title="Playing audio">${ICON.audio}</span>` : ''}${t.active ? '<span class="live" title="The visible tab in its window"></span>' : ''}</button>
-    ${AIUI.tabSumButton(t)}<button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close ${esc(titleOf(t))}">${ICON.close}</button></li>${AIUI.tabSumRow(t)}`;
+    ${AIUI.tabSumButton(t)}<button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close ${esc(titleOf(t))}">${ICON.close}</button></li>`;
 }
 
 function cardTabList(key, tabs) {
@@ -358,7 +367,7 @@ function groupCard(g) {
       <button class="btn sm" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch</button>
       <button class="icon-btn" data-act="card-more" type="button" title="More actions" aria-label="More actions for ${esc(g.name)}">${ICON.more}</button>
     </header>
-    <div class="card-meta">${esc(meta.join(' · '))}</div>
+    <div class="card-meta">${esc(meta.join(' · '))}${AIUI.groupStatusBadge(g)}</div>
     ${cardSummary(g)}
     ${cardTabList(g.id, g.tabs)}
   </article>`;
@@ -375,12 +384,13 @@ function inboxCard() {
 }
 
 function renderDashboard() {
-  const g = model.groups;
+  const urgent = AIUI.aiEnabled() && urgentFirst;
+  const g = urgent ? sortByUrgency(model.groups) : model.groups;
   let h = `<div class="pane wide"><div class="pane-head"><div class="pane-title">
       <div class="eyebrow"><span class="bar"></span>All open groups</div>
       <h1>Dashboard</h1>
       <div class="pane-meta">${plural(g.length, 'group')} · ${plural(model.tabCount, 'tab')}${model.windowCount > 1 ? ` · ${plural(model.windowCount, 'window')}` : ''}</div>
-    </div></div>`;
+    </div>${AIUI.aiEnabled() ? `<div class="actions"><label class="urgent-toggle" title="Groups with tabs that need you come first"><input type="checkbox" data-act="urgent" ${urgent ? 'checked' : ''}> Most urgent first</label></div>` : ''}</div>`;
   if (!g.length && !model.inbox.length) h += `<div class="empty"><strong>No open tabs</strong>Open some tabs and group them to see them here.</div>`;
   else {
     if (!g.length) h += `<div class="notice">No tab groups yet. Select tabs in the Inbox and move them to a new group.</div>`;
@@ -576,6 +586,10 @@ function handleAction(act, row, e) {
     case 'color': e.stopPropagation(); return openMenu(act, m => colorSwatches(m, g));
     case 'group-more': e.stopPropagation(); return openMenu(act, m => groupMenu(m, g));
     case 'card-more': e.stopPropagation(); return openMenu(act, m => groupMenu(m, g, true));
+    case 'urgent':
+      urgentFirst = act.checked;
+      try { localStorage.setItem(URGENT_KEY, urgentFirst ? '1' : '0'); } catch {}
+      return renderMain();
     case 'card-all': {
       const key = card.dataset.card === 'inbox' ? 'inbox' : +card.dataset.card;
       showAllTabs.has(key) ? showAllTabs.delete(key) : showAllTabs.add(key);
@@ -850,7 +864,7 @@ async function start() {
   $('#kbdHint').textContent = `${MOD} K`;
   selfTab = await chrome.tabs.getCurrent();
   workspaces = await listWorkspaces();
-  await AIUI.initAi({ esc, toast, openModal, closeModal, render: () => render(), renderMain: () => renderMain(), tabById, groupById })
+  await AIUI.initAi({ esc, toast, openModal, closeModal, render: () => render(), renderMain: () => renderMain(), tabById, groupById, openMenu, menuItem, menuLabel, allTabs: () => allTabs(model) })
     .catch(e => console.error('AI summaries failed to start', e));
   await refresh();
   // Open on the dashboard, or on the group you were just working in if you

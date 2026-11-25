@@ -327,7 +327,6 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .link { border: 0; background: none; padding: 0; color: var(--focus); font: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .ai-card { border: 1px solid color-mix(in srgb, var(--g-purple) 35%, var(--line)); background: color-mix(in srgb, var(--g-purple) 5%, var(--surface)); border-radius: 12px; padding: 10px 14px 12px; }
 .ai-card.group { margin-bottom: 14px; }
-.tab-sum { list-style: none; padding: 0 12px 12px 58px; }
 .ai-head { display: flex; align-items: center; gap: 8px; min-height: 30px; flex-wrap: wrap; }
 .ai-title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; }
 .ai-title svg { width: 15px; height: 15px; color: var(--g-purple); }
@@ -381,13 +380,68 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-glist li:first-child { border-top: 0; }
 .ai-glist li span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-glist .icon-btn { width: 26px; height: 26px; }
-@media (max-width: 720px) { .tab-sum { padding-left: 12px; } }
 /* AI summaries inside dashboard cards: tighter than in the detail pane. */
 .card .ai-card { margin: 4px 0 2px; padding: 8px 10px 10px; border-radius: 10px; }
 .card .ai-card.group { margin-bottom: 2px; }
 .card .ai-text { font-size: 13px; }
 .card .ai-text ul { padding-left: 18px; }
 .card .ai-instr-chip { margin: 2px 0; padding: 4px 10px; }
-.card-tabs .tab-sum { padding: 2px 0 6px 0; }
 .card-head .ai-card-btn svg { color: var(--g-purple); width: 15px; height: 15px; }
 .card .ai-when { display: none; }
+
+/* AI: one-line summaries, statuses, group sentence */
+.ai-line { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.ai-line:empty { display: none; }
+.ai-line .ai-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-text .ai-line { margin-top: 2px; }
+.ai-dim { color: var(--faint); }
+.ai-line .ai-spin { width: 11px; height: 11px; }
+.ai-line .ai-bad { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-tab-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.card-tab-text .ai-line { font-size: 12px; }
+.card-tab:has(.ai-sum) .card-tab-btn, .card-tab:has(.ai-line:not(:empty)) .card-tab-btn { align-items: flex-start; }
+.card-tab:has(.ai-line:not(:empty)) .fav { margin-top: 1px; }
+.ai-st-wrap { display: inline-flex; flex: none; }
+.ai-st-wrap:empty { display: none; }
+.ai-st { --s: var(--faint); display: inline-flex; align-items: center; gap: 5px; flex: none; font: inherit; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; padding: 1px 7px 1px 6px; border-radius: 10px; border: 0; color: var(--s); background: color-mix(in srgb, var(--s) 14%, transparent); white-space: nowrap; cursor: pointer; }
+.ai-st i { width: 7px; height: 7px; border-radius: 50%; background: var(--s); flex: none; }
+.ai-st.static { cursor: default; }
+.ai-st.manual { box-shadow: inset 0 0 0 1px var(--s); }
+.ai-st.st-none { color: var(--faint); background: transparent; border: 1px dashed var(--line); padding: 0 6px; opacity: 0; }
+.tab:hover .ai-st.st-none, .tab:focus-within .ai-st.st-none { opacity: 1; }
+.st-action { --s: var(--g-red); }
+.st-working { --s: var(--g-blue); }
+.st-waiting { --s: var(--g-yellow); }
+.st-done { --s: var(--g-green); }
+.st-info { --s: var(--g-grey); }
+.st-none { --s: var(--faint); }
+.ai-dot-btn { width: 18px; height: 26px; flex: none; display: grid; place-items: center; padding: 0; border: 0; background: transparent; border-radius: 6px; }
+.ai-dot-btn i { width: 8px; height: 8px; border-radius: 50%; background: var(--s); box-shadow: 0 0 0 2px color-mix(in srgb, var(--s) 22%, transparent); }
+.ai-dot-btn.st-none i { background: transparent; box-shadow: inset 0 0 0 1.5px var(--line); opacity: 0; }
+.card-tab:hover .ai-dot-btn.st-none i, .ai-dot-btn.st-none:focus-visible i { opacity: 1; }
+.ai-dot-btn:hover { background: var(--surface); }
+.card-tab:has(.ai-line:not(:empty)) .ai-dot-btn { align-self: flex-start; margin-top: 2px; }
+.pane-meta .ai-st-wrap { vertical-align: 1px; margin-left: 6px; }
+.card-meta .ai-st-wrap { margin-left: 6px; vertical-align: 1px; }
+.card-tab-text .ai-line .ai-sum { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ai-menu-hint { margin-left: auto; display: grid; width: 14px; color: var(--muted); }
+.ai-menu-hint svg { width: 14px; height: 14px; }
+.ai-gsum { border: 1px solid color-mix(in srgb, var(--g-purple) 35%, var(--line)); background: color-mix(in srgb, var(--g-purple) 5%, var(--surface)); border-radius: 12px; padding: 6px 10px 10px 14px; }
+.ai-gsum.detail { margin-bottom: 14px; }
+.card .ai-gsum { padding: 4px 6px 8px 10px; border-radius: 10px; margin: 2px 0; }
+.ai-ghead { display: flex; align-items: center; gap: 8px; min-height: 30px; }
+.card .ai-ghead { min-height: 26px; }
+.card .ai-ghead .ai-title { font-size: 12px; color: var(--muted); }
+.ai-gtext { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.45; }
+.card .ai-gtext { font-size: 13px; }
+.urgent-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; padding: 7px 4px; }
+.urgent-toggle input { accent-color: var(--focus); margin: 0; }
+.ai-rule { border: 1px solid var(--line); border-radius: 8px; padding: 6px; margin: 8px 0; display: grid; gap: 4px; }
+.ai-rule.flash { animation: flash 1.6s ease-out; }
+.ai-rule-top { display: flex; gap: 4px; align-items: center; }
+.ai-rule-top input, .ai-rule textarea { width: 100%; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.ai-rule-top input { font-family: var(--font-mono); font-size: 12.5px; }
+.ai-rule textarea { resize: vertical; min-height: 48px; line-height: 1.45; }
+.ai-rule-count { color: var(--muted); padding-left: 2px; }
+.ai-rule-count:empty { display: none; }
+.ai-settings code { font-family: var(--font-mono); font-size: 11.5px; background: var(--surface-2); padding: 0 3px; border-radius: 3px; }

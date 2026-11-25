@@ -9,10 +9,11 @@ export const MAX_INSTRUCTIONS = 2000;
 export const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
   engine: 'auto',          // 'auto' | 'local' | 'cloud'
-  length: 'short',         // 'short' | 'medium'
+  auto: 'local',           // summarize tabs automatically: 'off' | 'local' (on-device only) | 'all'
   model: DEFAULT_MODEL,
   general: '',             // instructions for every summary
   groups: {},              // { [normalized group name]: instructions }
+  rules: [],               // [{ pattern, instructions }] for pages whose URL matches
   cloudConsentAt: 0,
   pageAccessDeclined: false,
 });
@@ -20,7 +21,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
 export function normalizeSettings(s) {
   const out = { ...DEFAULT_SETTINGS, ...(s && typeof s === 'object' ? s : {}) };
   if (!['auto', 'local', 'cloud'].includes(out.engine)) out.engine = 'auto';
-  if (!['short', 'medium'].includes(out.length)) out.length = 'short';
+  if (!['off', 'local', 'all'].includes(out.auto)) out.auto = 'local';
+  delete out.length;
   if (typeof out.model !== 'string' || !out.model.trim()) out.model = DEFAULT_MODEL;
   out.model = out.model.trim();
   out.general = clip(String(out.general || ''), MAX_INSTRUCTIONS);
@@ -33,8 +35,14 @@ export function normalizeSettings(s) {
     }
   }
   out.groups = groups;
+  out.rules = (Array.isArray(out.rules) ? out.rules : [])
+    .map(r => ({ pattern: String(r?.pattern || '').trim(), instructions: clip(String(r?.instructions || '').trim(), MAX_INSTRUCTIONS) }))
+    .filter(r => r.pattern && r.instructions && compilePattern(r.pattern))
+    .slice(0, MAX_RULES);
   return out;
 }
+
+export const MAX_RULES = 50;
 
 const clip = (s, n) => (s.length > n ? s.slice(0, n) : s);
 
@@ -43,14 +51,141 @@ export function groupKey(name) {
   return String(name ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-/** The instructions that apply to a summary: general first, then the group's own. */
-export function instructionsFor(settings, groupName) {
+/** The instructions that apply to a summary: general first, then the group's own, then matching URL rules. */
+export function instructionsFor(settings, groupName, url) {
   const parts = [];
   const g = settings.general?.trim();
   if (g) parts.push(g);
   const own = groupName != null ? settings.groups?.[groupKey(groupName)]?.trim() : '';
   if (own) parts.push(own);
+  if (url) for (const r of rulesFor(settings.rules, url)) parts.push(r.instructions);
   return parts.join('\n');
+}
+
+/* ---------- URL rules ---------- */
+
+/**
+ * Turn a rule pattern into a matcher, or null when it is invalid.
+ *  - "/regex/flags" is a regular expression tested against the full URL (case-insensitive unless flags say otherwise).
+ *  - "example.com" (no slash, no *) matches that site and its subdomains, any page.
+ *  - Anything else is a URL pattern matched against host + path, the whole of it:
+ *    "*" matches within one path segment, "**" matches anything. The scheme, a trailing slash and
+ *    the #hash are ignored; the ?query is ignored unless the pattern has one.
+ */
+export function compilePattern(pattern) {
+  const p = String(pattern || '').trim();
+  if (!p) return null;
+  const rx = /^\/(.+)\/([a-z]*)$/.exec(p);
+  if (rx) {
+    try {
+      const re = new RegExp(rx[1], rx[2].includes('i') ? rx[2] : rx[2] + 'i');
+      return { kind: 'regex', test: url => { re.lastIndex = 0; return re.test(url); } };
+    } catch { return null; }
+  }
+  const bare = p.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+  if (!/[/*?]/.test(bare)) {
+    const host = bare.toLowerCase().replace(/^www\./, '');
+    if (!/^[a-z0-9.-]+(:\d+)?$/.test(host)) return null;
+    return { kind: 'site', test: url => { const h = urlParts(url)?.host; return !!h && (h === host || h.endsWith('.' + host)); } };
+  }
+  const withQuery = bare.includes('?');
+  const noWww = bare.replace(/^www\./i, '');
+  const q = noWww.indexOf('?');
+  const body = q < 0 ? trimSlash(noWww) : trimSlash(noWww.slice(0, q)) + noWww.slice(q);
+  const src = body.split('**').map(part => part.split('*').map(x => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*');
+  const re = new RegExp(`^${src}$`, 'i');
+  return { kind: 'url', test: url => { const u = urlParts(url); return !!u && re.test(trimSlash(u.host + u.path) + (withQuery ? u.query : '')); } };
+}
+
+function trimSlash(s) { return s.length > 1 && s.endsWith('/') ? s.replace(/\/+$/, '') : s; }
+
+function urlParts(url) {
+  const m = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)([^?#]*)(\?[^#]*)?/i.exec(String(url || ''));
+  if (!m) return null;
+  return { host: m[1].toLowerCase().replace(/^www\./, ''), path: m[2] || '/', query: m[3] || '' };
+}
+
+export function matchesPattern(pattern, url) { return !!compilePattern(pattern)?.test(url); }
+
+/** Rules whose pattern matches the URL, in list order. */
+export function rulesFor(rules, url) {
+  return (rules || []).filter(r => matchesPattern(r.pattern, url));
+}
+
+/** A pattern suggestion for a URL: host + path without the query, e.g. "github.com/owner/repo/pull/5". */
+export function suggestPattern(url) {
+  const u = urlParts(url);
+  return u ? trimSlash(u.host + u.path) : '';
+}
+
+/* ---------- status ---------- */
+
+export const STATUSES = {
+  action: { label: 'Needs you', hint: 'Waiting for you to do something: review, reply, approve, fix or finish.' },
+  working: { label: 'In progress', hint: 'Being worked on or running: a build, a draft, an agent, a checkout.' },
+  waiting: { label: 'Waiting', hint: 'Blocked on someone or something else.' },
+  done: { label: 'Done', hint: 'Finished: merged, closed, resolved, sent, completed.' },
+  info: { label: 'Reference', hint: 'Something to read or look up. No task.' },
+};
+export const STATUS_ORDER = ['action', 'working', 'waiting', 'done', 'info'];
+export const normalizeStatus = s => (STATUS_ORDER.includes(s) ? s : null);
+
+/** The most urgent status of a list (null when none is known). */
+export function rollupStatus(list) {
+  let best = null;
+  for (const s of list) if (normalizeStatus(s) && (best == null || STATUS_ORDER.indexOf(s) < STATUS_ORDER.indexOf(best))) best = s;
+  return best;
+}
+
+/** Sort rank for "most urgent first": unknown sorts after Waiting, before Done. */
+export function statusRank(s) {
+  const i = STATUS_ORDER.indexOf(s);
+  return i < 0 ? 2.5 : i;
+}
+
+/** The status to show: a status the person set by hand wins over the AI's. */
+export const effectiveStatus = ins => (ins ? normalizeStatus(ins.manual) || normalizeStatus(ins.status) : null);
+
+/* ---------- one sentence ---------- */
+
+/** Reduce model output to one plain sentence. */
+export function oneSentence(text, max = 240) {
+  let s = String(text ?? '')
+    .replace(/^\s*(?:[-*•]|\d+[.)])\s+/gm, '')
+    .replace(/\*\*|__|`/g, '')
+    .replace(/^#+\s*/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const m = /^(.+?[.!?。！？])(\s|$)/.exec(s);
+  if (m && m[1].length >= 20) s = m[1];
+  if (s.length > max) s = s.slice(0, max - 1).replace(/\s+\S*$/, '') + '…';
+  return s;
+}
+
+/** Parse {summary, status} from a model reply that should be JSON, tolerating code fences and stray text. */
+export function parseInsight(text) {
+  const raw = String(text ?? '').trim();
+  const m = /\{[\s\S]*\}/.exec(raw);
+  if (m) {
+    try {
+      const j = JSON.parse(m[0]);
+      const summary = oneSentence(j.summary || j.sentence || '');
+      if (summary) return { summary, status: normalizeStatus(String(j.status || '').toLowerCase()) };
+    } catch {}
+  }
+  return { summary: oneSentence(raw.replace(/^```\w*|```$/g, '')), status: null };
+}
+
+/** Saved tab insights are keyed by URL without its #hash. */
+export function insightKey(url) { return String(url || '').replace(/#.*$/, ''); }
+
+export const INSIGHT_TTL = 30 * 24 * 3600 * 1000;
+export const INSIGHT_MAX = 1000;
+
+/** Should a tab be summarized automatically? */
+export function needsInsight(ins, { now = Date.now(), staleAfter = 60 * 60 * 1000 } = {}) {
+  if (!ins) return true;
+  return now - (ins.at || 0) > staleAfter;
 }
 
 /* ---------- engine choice ---------- */
@@ -117,23 +252,34 @@ export function userInstructionBlock(instructions) {
   return instructions ? `\n\nThe user's own instructions (follow them unless they conflict with the rules above):\n${instructions}` : '';
 }
 
-export function tabPrompt({ title, url, text, length, instructions, lang = 'en' }) {
-  const n = length === 'medium' ? '5 to 7' : '3 to 5';
-  const system = `You summarize a web page for someone deciding whether to keep its browser tab open. ` +
-    `Write ${n} short Markdown bullet points in plain language. No preamble, no closing remarks. ` +
-    `Reply in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
+const STATUS_GUIDE = STATUS_ORDER.map(k => `"${k}" (${STATUSES[k].label}): ${STATUSES[k].hint}`).join('\n');
+
+export const INSIGHT_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    status: { type: 'string', enum: [...STATUS_ORDER, 'unknown'] },
+  },
+  required: ['summary', 'status'],
+};
+
+/** Prompt for one tab: a one-sentence summary plus a status, as JSON. */
+export function tabPrompt({ title, url, text, instructions, lang = 'en' }) {
+  const system = `You look at one browser tab for someone keeping track of many open tabs. ` +
+    `Reply with JSON only: {"summary": "...", "status": "..."}.\n` +
+    `"summary" is ONE short sentence (at most 25 words) saying what this page is and, if there is a task, where it stands. No preamble, no Markdown.\n` +
+    `"status" is one of:\n${STATUS_GUIDE}\n"unknown": none of these is clear.\n` +
+    `Write the summary in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
     userInstructionBlock(instructions);
-  const body = text ? clip(text, 60000) : '(The page text could not be read. Work from the title and URL only, and say so briefly.)';
+  const body = text ? clip(text, 60000) : '(The page text could not be read. Work from the title and URL only.)';
   const user = `Title: ${title}\nURL: ${url}\n<page>\n${body}\n</page>`;
   return { system, user };
 }
 
 export function groupPrompt({ name, tabs, instructions, lang = 'en', budget = 200000 }) {
   const system = `These are browser tabs a user grouped together under the name "${name}". ` +
-    `First, in one or two sentences, say what this group or project is about. ` +
-    `Then a blank line and 3 to 5 Markdown bullet points with the key themes. ` +
-    `If some tabs look unrelated to the rest, end with one line starting "Unrelated:" naming them. ` +
-    `No preamble. Reply in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
+    `In ONE short sentence (at most 30 words), say what this group or project is about and where it stands. ` +
+    `Plain text, no Markdown, no preamble. Reply in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
     userInstructionBlock(instructions);
   const per = Math.max(1500, Math.floor(budget / Math.max(1, tabs.length)));
   let used = 0;
@@ -150,19 +296,28 @@ export function groupPrompt({ name, tabs, instructions, lang = 'en', budget = 20
 export function localContext(kind, { groupName, instructions } = {}) {
   const base = kind === 'group'
     ? `Short summaries of browser tabs the user grouped together${groupName ? ` as "${groupName}"` : ''}. Describe what this group of tabs is about.`
-    : 'A web page the user has open in a browser tab.';
+    : 'A web page the user has open in a browser tab. Say in one sentence what it is.';
   return instructions ? `${base}\nUser instructions: ${instructions}` : base;
 }
 
 /* ---------- Gemini API ---------- */
 
-export function geminiRequest({ model, system, user }) {
+export function geminiRequest({ model, system, user, json = false }) {
+  const generationConfig = { temperature: 0.3 };
+  if (json) {
+    generationConfig.responseMimeType = 'application/json';
+    generationConfig.responseSchema = {
+      type: 'OBJECT',
+      properties: { summary: { type: 'STRING' }, status: { type: 'STRING', enum: [...STATUS_ORDER, 'unknown'] } },
+      required: ['summary', 'status'],
+    };
+  }
   return {
     url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
     body: {
       systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: 'user', parts: [{ text: user }] }],
-      generationConfig: { temperature: 0.3 },
+      generationConfig,
     },
   };
 }

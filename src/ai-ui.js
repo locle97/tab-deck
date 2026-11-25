@@ -1,28 +1,46 @@
-// AI summaries on the Tab Desk page: Summarize buttons, result cards, AI settings and
-// custom instructions (general, and per group). The engines live in lib/ai.js.
+// AI summaries on the Tab Desk page: a one-sentence summary under every tab, a status for each tab
+// (Needs you, In progress, Waiting, Done, Reference) judged by the AI or set by hand, a one-sentence
+// summary per group, AI settings, and custom instructions (general, per group, per URL pattern).
+// The engines live in lib/ai.js.
 
 import * as AI from './lib/ai.js';
-import { renderSummary, groupKey, chooseEngine, DEFAULT_MODEL, MAX_INSTRUCTIONS } from './lib/ai-core.js';
+import {
+  groupKey, chooseEngine, DEFAULT_MODEL, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
+  effectiveStatus, rollupStatus, needsInsight, isReadableUrl, compilePattern, suggestPattern, rulesFor,
+} from './lib/ai-core.js';
 
 const GEMINI_ORIGINS = ['https://generativelanguage.googleapis.com/*'];
 const AI_STUDIO = 'https://aistudio.google.com/apikey';
 
 const IC = {
   spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8L12 3Z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/></svg>',
-  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>',
   note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4Z"/><path d="M13.5 6.5l4 4"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
 };
 
 let ctx = null;
-let state = { settings: AI.DEFAULT_SETTINGS, hasKey: false, local: 'unavailable', access: false };
-const sums = new Map(); // 'tab:<id>' | 'group:<id>' -> card state
+let state = { settings: AI.DEFAULT_SETTINGS, hasKey: false, local: 'unavailable', localApi: null, access: false };
+
+/* ---------- per-tab work queue ---------- */
+const queue = [];            // [{ tabId, force }]
+const queued = new Set();    // tab ids waiting
+const busy = new Set();      // tab ids running
+const tabErrors = new Map(); // tab id -> message
+const seen = new Map();      // tab id -> URL already looked at this session (auto mode)
+const waiters = new Map();   // tab id -> [resolve]
+const groupRuns = new Map(); // group id -> { status, text, statusText, progress, error, code, ctrl }
+let workers = 0;
 
 /* ---------- setup ---------- */
 
 export async function initAi(c) {
   ctx = c;
-  await refreshState();
+  await Promise.all([refreshState(), AI.loadInsights()]);
   AI.onSettingsChanged(async () => { await refreshState(); ctx.render(); });
+  AI.onInsightsChanged(schedulePaint);
   chrome.permissions.onAdded.addListener(refreshAccess);
   chrome.permissions.onRemoved.addListener(refreshAccess);
   document.getElementById('aiSettingsBtn')?.addEventListener('click', () => openAiSettings());
@@ -30,8 +48,8 @@ export async function initAi(c) {
 }
 
 async function refreshState() {
-  const [{ settings, hasKey, local }, access] = await Promise.all([AI.engineState(), AI.hasPageAccess()]);
-  state = { settings, hasKey, local, access };
+  const [st, access] = await Promise.all([AI.engineState(), AI.hasPageAccess()]);
+  state = { ...st, access };
   paintSideButton();
 }
 async function refreshAccess() { state.access = await AI.hasPageAccess(); }
@@ -46,49 +64,127 @@ function paintSideButton() {
 
 const esc = s => ctx.esc(s);
 export const aiEnabled = () => state.settings.enabled;
+const urlOf = t => t.url || t.pendingUrl || '';
 
 /* ---------- markup hooks used by dashboard.js ---------- */
 
+/** Sparkle button on a tab row: summarize this tab again. */
 export function tabSumButton(t) {
   if (!aiEnabled()) return '';
   return `<button class="icon-btn" data-act="ai-tab" type="button" title="Summarize tab" aria-label="Summarize ${esc(t.title || 'tab')}">${IC.spark}</button>`;
 }
 
-export function tabSumRow(t) {
-  const k = `tab:${t.id}`;
-  if (!aiEnabled() || !sums.has(k)) return '';
-  return `<li class="tab-sum" data-for="${t.id}">${card(k)}</li>`;
+/** Kept for older call sites: tab summaries now show as a line under the title (tabLine). */
+export const tabSumRow = () => '';
+
+/** The one-sentence summary under a tab's title. */
+export function tabLine(t) {
+  if (!aiEnabled()) return '';
+  return `<span class="ai-line" data-ai-tab="${t.id}">${tabLineInner(t)}</span>`;
+}
+function tabLineInner(t) {
+  if (busy.has(t.id)) return '<span class="ai-spin" aria-hidden="true"></span><span class="ai-dim">Summarizing…</span>';
+  if (tabErrors.has(t.id)) return `<span class="ai-bad">${esc(tabErrors.get(t.id))}</span>`;
+  const ins = AI.tabInsight(urlOf(t));
+  if (ins?.summary) {
+    const meta = `${ins.engine === 'cloud' ? 'Gemini · cloud' : 'On-device'} · ${ago(ins.at)}${ins.readable === false ? ' · from the title only' : ''}`;
+    return `<span class="ai-sum" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</span>`;
+  }
+  if (queued.has(t.id)) return '<span class="ai-dim">Waiting to summarize…</span>';
+  return '';
+}
+
+/** Status pill for a tab. `compact` shows only the dot (dashboard cards). */
+export function tabStatus(t, { compact = false } = {}) {
+  if (!aiEnabled()) return '';
+  return `<span class="ai-st-wrap" data-ai-st="${t.id}" data-compact="${compact ? 1 : 0}">${tabStatusInner(t, compact)}</span>`;
+}
+function tabStatusInner(t, compact) {
+  const ins = AI.tabInsight(urlOf(t));
+  const s = effectiveStatus(ins);
+  const label = s ? STATUSES[s].label : 'No status';
+  const why = s ? `${label}${ins?.manual ? ' (set by you)' : ' (from AI)'}. Click to change.` : 'No status yet. Click to set one.';
+  if (compact) return `<button class="ai-dot-btn st-${s || 'none'}" data-act="ai-status" type="button" title="${esc(why)}" aria-label="Status: ${esc(label)}"><i></i></button>`;
+  if (!s) return `<button class="ai-st st-none" data-act="ai-status" type="button" title="${esc(why)}">Set status</button>`;
+  return `<button class="ai-st st-${s}${ins?.manual ? ' manual' : ''}" data-act="ai-status" type="button" title="${esc(why)}"><i></i>${esc(label)}</button>`;
+}
+
+/** Most urgent status among a group's tabs. */
+export function groupStatus(g) {
+  return rollupStatus(g.tabs.map(t => effectiveStatus(AI.tabInsight(urlOf(t)))));
+}
+export function groupStatusBadge(g) {
+  if (!aiEnabled()) return '';
+  return `<span class="ai-st-wrap" data-ai-gst="${g.id}">${groupStatusInner(g)}</span>`;
+}
+function groupStatusInner(g) {
+  const s = groupStatus(g);
+  if (!s) return '';
+  const n = g.tabs.filter(t => effectiveStatus(AI.tabInsight(urlOf(t))) === s).length;
+  return `<span class="ai-st st-${s} static" title="Most urgent tab status in this group"><i></i>${esc(STATUSES[s].label)}${n > 1 ? ` · ${n}` : ''}</span>`;
 }
 
 export function groupSumButtons() {
   if (!aiEnabled()) return '';
-  return `<button class="btn" data-act="ai-group" type="button" title="Summarize what this group is about">${IC.spark} Summarize</button>`;
+  return `<button class="btn" data-act="ai-group" type="button" title="Summarize this group and each of its tabs">${IC.spark} Summarize</button>`;
 }
 
 /** Compact Summarize button for a group card on the dashboard. */
 export function cardSumButton() {
   if (!aiEnabled()) return '';
-  return `<button class="icon-btn ai-card-btn" data-act="ai-group" type="button" title="Summarize what this group is about" aria-label="Summarize this group">${IC.spark}</button>`;
+  return `<button class="icon-btn ai-card-btn" data-act="ai-group" type="button" title="Summarize this group and each of its tabs" aria-label="Summarize this group">${IC.spark}</button>`;
 }
 
-export function groupSumCard(g) {
+/** The group's one-sentence summary. `detail` also shows the instructions chip when there's no summary. */
+export function groupSumCard(g, { detail = false } = {}) {
   if (!aiEnabled()) return '';
-  const k = `group:${g.id}`;
-  const own = state.settings.groups[groupKey(g.name)];
-  if (!sums.has(k)) {
-    return own ? `<div class="ai-instr-chip">${IC.note}<span>This group has its own AI instructions.</span><button class="link" data-act="ai-instr" type="button">Edit</button></div>` : '';
+  const run = groupRuns.get(g.id);
+  const ins = AI.groupInsight(g.name);
+  if (!run && !ins) {
+    const own = state.settings.groups[groupKey(g.name)];
+    return detail && own ? `<div class="ai-instr-chip">${IC.note}<span>This group has its own AI instructions.</span><button class="link" data-act="ai-instr" type="button">Edit</button></div>` : '';
   }
-  return card(k);
+  return `<div data-sum="group:${g.id}">${groupSumInner(g, detail)}</div>`;
+}
+
+function groupSumInner(g, detail) {
+  const run = groupRuns.get(g.id);
+  const ins = AI.groupInsight(g.name);
+  const running = run?.status === 'running';
+  let body = '';
+  if (running) {
+    body = run.text ? `<p class="ai-gtext">${esc(run.text)}</p>` : '';
+    body += `<div class="ai-status" role="status">${run.progress != null ? `<span class="ai-bar"><i style="width:${Math.round(run.progress * 100)}%"></i></span>` : '<span class="ai-spin" aria-hidden="true"></span>'}${esc(run.statusText || 'Working…')}</div>`;
+  } else if (run?.status === 'error') {
+    const fix = ['key', 'model', 'no-engine'].includes(run.code) ? '<button class="btn sm" data-act="ai-settings" type="button">Open AI settings</button>' : '<button class="btn sm" data-act="ai-refresh" type="button">Try again</button>';
+    body = `${ins?.summary ? `<p class="ai-gtext">${esc(ins.summary)}</p>` : ''}<div class="ai-error">${esc(run.error)} ${fix}</div>`;
+  } else if (ins?.summary) {
+    body = `<p class="ai-gtext">${esc(ins.summary)}</p>`;
+  }
+  const engine = ins && !running ? `<span class="ai-engine${ins.engine === 'cloud' ? ' cloud' : ''}">${ins.engine === 'cloud' ? 'Gemini · cloud' : 'On-device'}</span><span class="ai-when">${esc(ago(ins.at))}</span>` : '';
+  const tools = running
+    ? '<button class="btn ghost sm" data-act="ai-stop" type="button">Stop</button>'
+    : `<button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${IC.refresh}</button>
+       <button class="icon-btn" data-act="ai-instr" type="button" title="AI instructions for this group" aria-label="AI instructions for this group">${IC.note}</button>
+       <button class="icon-btn" data-act="ai-dismiss" type="button" title="Remove this summary" aria-label="Remove this summary">${IC.close}</button>`;
+  const notes = [];
+  if (detail && ins && !running) {
+    if (ins.unreadable?.length) notes.push(`${ins.unreadable.length === 1 ? '1 tab' : `${ins.unreadable.length} tabs`} couldn’t be read and counted by title only.`);
+    if (ins.skipped) notes.push(`Used the 20 most recent tabs; ${ins.skipped} more were left out.`);
+  }
+  return `<section class="ai-gsum${detail ? ' detail' : ''}" aria-label="Group summary" aria-busy="${running}">
+    <div class="ai-ghead"><span class="ai-title">${IC.spark}${detail ? 'What this group is about' : 'Summary'}</span>${engine}<span class="ai-tools">${tools}</span></div>
+    ${body}${notes.length ? `<div class="ai-note">${notes.join(' ')}</div>` : ''}</section>`;
 }
 
 export function aiCommands(cur) {
   if (!aiEnabled()) return [{ type: 'cmd', label: 'AI settings', sub: 'AI summaries are off', ico: IC.gear, run: () => openAiSettings() }];
   const c = [];
   if (cur) {
-    c.push({ type: 'cmd', label: `Summarize “${cur.name}”`, sub: 'What is this group about?', ico: IC.spark, run: () => start('group', cur.id) });
+    c.push({ type: 'cmd', label: `Summarize “${cur.name}”`, sub: 'One sentence for the group and each tab, with statuses', ico: IC.spark, run: () => start('group', cur.id) });
     c.push({ type: 'cmd', label: `AI instructions for “${cur.name}”`, sub: 'Tell the AI how to summarize this group', ico: IC.note, run: () => openGroupInstructions(cur) });
   }
-  c.push({ type: 'cmd', label: 'AI settings', sub: 'Engine, Gemini API key, general instructions', ico: IC.gear, run: () => openAiSettings() });
+  c.push({ type: 'cmd', label: 'AI settings', sub: 'Engine, Gemini API key, instructions for sites and pages', ico: IC.gear, run: () => openAiSettings() });
   return c;
 }
 
@@ -99,7 +195,7 @@ export function groupMenuItems(g) {
   return [{ html: `<span>${has ? 'Edit' : 'Add'} AI instructions for this group…</span>`, run: () => openGroupInstructions(g) }];
 }
 
-/** Keep a group's instructions when it is renamed. */
+/** Keep a group's instructions (and summary) when it is renamed. */
 export async function onGroupRenamed(oldName, newName) {
   const from = groupKey(oldName), to = groupKey(newName);
   const groups = { ...state.settings.groups };
@@ -112,154 +208,214 @@ export async function onGroupRenamed(oldName, newName) {
 /** Clicks on data-act="ai-*". Returns true when handled. */
 export function handleAiAction(a, el, row, g) {
   const key = el.closest('[data-sum]')?.dataset.sum;
+  const tid = row ? +row.dataset.id : null;
   switch (a) {
-    case 'ai-tab': start('tab', +row.dataset.id); return true;
+    case 'ai-tab': start('tab', tid); return true;
     case 'ai-group': if (g) start('group', g.id); return true;
-    case 'ai-refresh': { const [kind, id] = key.split(':'); start(kind, +id, { force: true }); return true; }
-    case 'ai-stop': sums.get(key)?.ctrl?.abort(); return true;
-    case 'ai-dismiss': sums.get(key)?.ctrl?.abort(); sums.delete(key); ctx.renderMain(); return true;
-    case 'ai-copy': {
-      const s = sums.get(key);
-      if (s?.text) navigator.clipboard.writeText(s.text).then(() => ctx.toast('Summary copied'), () => ctx.toast('Couldn’t copy'));
-      return true;
-    }
+    case 'ai-refresh': if (key) { const [kind, id] = key.split(':'); start(kind, +id, { force: true }); } return true;
+    case 'ai-stop': if (key) groupRuns.get(+key.split(':')[1])?.ctrl?.abort(); return true;
+    case 'ai-dismiss': if (g) { groupRuns.delete(g.id); AI.clearGroupInsight(g.name); } return true;
     case 'ai-instr': if (g) openGroupInstructions(g); return true;
     case 'ai-settings': openAiSettings(); return true;
-    case 'ai-grant': grantAccessThen(() => { const [kind, id] = key.split(':'); start(kind, +id, { force: true }); }); return true;
+    case 'ai-status': if (tid != null) statusMenu(el, tid); return true;
   }
   return false;
 }
 
-/* ---------- running a summary ---------- */
+/* ---------- status menu ---------- */
 
-function target(kind, id) {
-  if (kind === 'tab') {
-    const x = ctx.tabById(id);
-    return x && { tab: x.t, groupName: x.owner?.name ?? null, title: x.t.title };
-  }
-  const g = ctx.groupById(id);
-  return g && { group: g, groupName: g.name, title: g.name };
+function statusMenu(anchor, tabId) {
+  const x = ctx.tabById(tabId);
+  if (!x) return;
+  const url = urlOf(x.t);
+  const ins = AI.tabInsight(url);
+  const cur = effectiveStatus(ins);
+  ctx.openMenu(anchor, m => {
+    ctx.menuLabel(m, ins?.status && !ins.manual ? `Status · AI says ${STATUSES[ins.status].label}` : 'Status');
+    STATUS_ORDER.forEach(s => ctx.menuItem(m,
+      `<span class="ai-st st-${s} static"><i></i>${STATUSES[s].label}</span><span class="ai-menu-hint">${cur === s ? IC.check : ''}</span>`,
+      () => AI.setManualStatus(url, s)));
+    if (ins?.manual) ctx.menuItem(m, '<span>Let the AI decide</span>', () => AI.setManualStatus(url, null));
+    m.append(document.createElement('hr'));
+    ctx.menuItem(m, `${IC.refresh}<span>Summarize again</span>`, () => start('tab', tabId, { force: true }));
+    if (isReadableUrl(url)) {
+      const n = rulesFor(state.settings.rules, url).length;
+      ctx.menuItem(m, `${IC.note}<span>AI instructions for pages like this…${n ? ` (${n})` : ''}</span>`, () => openAiSettings({ newRule: suggestPattern(url), rulesFor: url }));
+    }
+  });
 }
+
+/* ---------- running ---------- */
 
 /**
- * Start a summary. Called straight from a click so Chrome sees a user gesture
- * (needed for the permission prompt and for the first on-device model download).
+ * Start from a click, so Chrome sees a user gesture (needed for the permission prompt and the first
+ * on-device model download).
  */
 function start(kind, id, { force = false } = {}) {
-  const t = target(kind, id);
-  if (!t) return;
   const s = state.settings;
   const engine = chooseEngine({ kind, setting: s.engine, local: state.local, hasKey: state.hasKey });
-
-  // 1. Page access: explain first, then let Chrome ask.
   if (!state.access && !s.pageAccessDeclined) return explainAccess(() => start(kind, id, { force }));
-  // 2. Cloud consent, once.
   if (engine === 'cloud' && !s.cloudConsentAt) return askCloudConsent(kind, () => start(kind, id, { force }));
-  run(kind, id, t, force);
+  if (kind === 'tab') {
+    tabErrors.delete(id);
+    enqueue(id, true, true);
+  } else runGroup(id, force);
 }
 
-async function run(kind, id, t, force) {
-  const key = `${kind}:${id}`;
-  sums.get(key)?.ctrl?.abort();
-  const s = { status: 'running', text: '', statusText: kind === 'group' ? 'Reading tabs…' : 'Reading the page…', progress: null, ctrl: new AbortController(), engine: null };
-  sums.set(key, s);
-  ctx.renderMain();
-  const paint = throttle(() => paint0(key), 60);
-  const opts = {
-    force, signal: s.ctrl.signal, access: state.access, groupName: t.groupName,
-    onChunk: text => { s.text = text; s.statusText = ''; paint(); },
-    onProgress: f => { s.progress = f; s.statusText = `Downloading the on-device model… ${Math.round(f * 100)}%`; paint(); },
-    onStatus: text => { s.statusText = text; paint(); },
-  };
+function enqueue(tabId, force = false, front = false) {
+  if (busy.has(tabId)) return new Promise(r => addWaiter(tabId, r));
+  const p = new Promise(r => addWaiter(tabId, r));
+  if (queued.has(tabId)) {
+    const i = queue.findIndex(q => q.tabId === tabId);
+    if (force && i >= 0) queue[i].force = true;
+    return p;
+  }
+  queued.add(tabId);
+  front ? queue.unshift({ tabId, force }) : queue.push({ tabId, force });
+  paintTab(tabId);
+  pump();
+  return p;
+}
+function addWaiter(id, r) { (waiters.get(id) || waiters.set(id, []).get(id)).push(r); }
+function settle(id) { (waiters.get(id) || []).forEach(r => r()); waiters.delete(id); }
+
+function pump() {
+  const cloud = chooseEngine({ kind: 'tab', setting: state.settings.engine, local: state.local, hasKey: state.hasKey }) === 'cloud';
+  const max = cloud ? 3 : 1;
+  while (workers < max && queue.length) {
+    const job = queue.shift();
+    queued.delete(job.tabId);
+    workers++;
+    runTab(job).finally(() => { workers--; pump(); });
+  }
+}
+
+async function runTab({ tabId, force }) {
+  const x = ctx.tabById(tabId);
+  if (!x) { settle(tabId); return; }
+  busy.add(tabId);
+  tabErrors.delete(tabId);
+  paintTab(tabId);
   try {
-    s.engine = await AI.plannedEngine(kind).catch(() => null);
-    paint();
-    const r = kind === 'tab'
-      ? await AI.summarizeTab(t.tab, opts)
-      : await AI.summarizeGroup({ name: t.group.name, tabs: t.group.tabs }, opts);
-    Object.assign(s, r, { status: 'done', statusText: '', progress: null });
+    await AI.summarizeTab(x.t, { force, access: state.access, groupName: x.owner?.name ?? null });
   } catch (e) {
-    if (e?.name === 'AbortError') Object.assign(s, { status: s.text ? 'done' : 'stopped', stopped: true, statusText: '' });
-    else { console.error(e); Object.assign(s, { status: 'error', error: e?.message || String(e), code: e?.code, statusText: '' }); }
+    if (e?.name !== 'AbortError') { console.warn('Summary failed', e); tabErrors.set(tabId, e?.message || String(e)); }
   }
-  s.ctrl = null;
-  if (state.local !== 'available' && s.engine === 'local' && s.status === 'done') refreshState();
-  paint0(key);
+  busy.delete(tabId);
+  if (state.local !== 'available') refreshState();
+  paintTab(tabId);
+  settle(tabId);
 }
 
-function paint0(key) {
-  const el = document.querySelector(`[data-sum="${key}"]`);
-  if (el) el.outerHTML = card(key);
-}
-
-function throttle(fn, ms) {
-  let t = null;
-  return () => { if (!t) t = setTimeout(() => { t = null; fn(); }, ms); };
-}
-
-const REASONS = {
-  restricted: 'Chrome doesn’t let extensions read this page, so this is based on its title and address only.',
-  sleeping: 'This tab is asleep, so this is based on its title and address only. Open the tab and summarize again for a full summary.',
-  'no-access': 'Tab Desk can’t read page text yet, so this is based on the title and address only.',
-  incognito: 'Incognito tabs aren’t read, so this is based on the title and address only.',
-  empty: 'The page had no readable text, so this is based on its title and address only.',
-  failed: 'The page couldn’t be read, so this is based on its title and address only.',
-};
-
-function card(key) {
-  const s = sums.get(key);
-  const isGroup = key.startsWith('group:');
-  const engine = s.engine === 'cloud' ? `<span class="ai-engine cloud" title="Sent to Google’s Gemini API with your key">Gemini · cloud</span>`
-    : s.engine === 'local' ? `<span class="ai-engine" title="Generated on this device. Nothing left your computer.">On-device</span>` : '';
-  const running = s.status === 'running';
-  const tools = running
-    ? `<button class="btn ghost sm" data-act="ai-stop" type="button">Stop</button>`
-    : `${s.text ? `<button class="icon-btn" data-act="ai-copy" type="button" title="Copy summary" aria-label="Copy summary">${COPY}</button>` : ''}
-       <button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${REFRESH}</button>
-       ${isGroup ? `<button class="icon-btn" data-act="ai-instr" type="button" title="AI instructions for this group" aria-label="AI instructions for this group">${IC.note}</button>` : ''}
-       <button class="icon-btn" data-act="ai-dismiss" type="button" title="Hide summary" aria-label="Hide summary">${CLOSE}</button>`;
-  const when = s.status === 'done' ? `<span class="ai-when">${s.cached ? 'Saved summary' : 'Just now'}</span>` : '';
-  let body = '';
-  if (s.text) body = `<div class="ai-text">${renderSummary(s.text)}</div>`;
-  if (running && s.statusText) body += `<div class="ai-status" role="status">${s.progress != null ? `<span class="ai-bar"><i style="width:${Math.round(s.progress * 100)}%"></i></span>` : '<span class="ai-spin" aria-hidden="true"></span>'}${esc(s.statusText)}</div>`;
-  if (s.status === 'error') {
-    const fix = s.code === 'key' || s.code === 'model' || s.code === 'no-engine'
-      ? `<button class="btn sm" data-act="ai-settings" type="button">Open AI settings</button>` : `<button class="btn sm" data-act="ai-refresh" type="button">Try again</button>`;
-    body += `<div class="ai-error">${esc(s.error)} ${fix}</div>`;
+async function runGroup(id, force) {
+  const g = ctx.groupById(id);
+  if (!g) return;
+  groupRuns.get(id)?.ctrl?.abort();
+  const run = { status: 'running', text: '', statusText: 'Summarizing tabs…', progress: null, ctrl: new AbortController() };
+  groupRuns.set(id, run);
+  ctx.renderMain();
+  const paint = () => paintGroup(id);
+  try {
+    // Every tab first, so the group sentence (and the status roll-up) uses fresh tab summaries.
+    let done = 0;
+    const tabs = g.tabs.filter(t => isReadableUrl(urlOf(t)) || !state.access);
+    run.statusText = `Summarizing tabs: 0 of ${tabs.length}`;
+    paint();
+    await Promise.all(tabs.map(t => enqueue(t.id, force).then(() => { done++; run.statusText = `Summarizing tabs: ${done} of ${tabs.length}`; paint(); })));
+    if (run.ctrl.signal.aborted) throw new DOMException('Stopped', 'AbortError');
+    const live = ctx.groupById(id) || g;
+    await AI.summarizeGroup({ name: live.name, tabs: live.tabs }, {
+      force, signal: run.ctrl.signal, access: state.access,
+      onChunk: text => { run.text = text; run.statusText = 'Writing…'; paint(); },
+      onProgress: f => { run.progress = f; run.statusText = `Downloading the on-device model… ${Math.round(f * 100)}%`; paint(); },
+      onStatus: text => { run.statusText = text; paint(); },
+    });
+    groupRuns.delete(id);
+  } catch (e) {
+    if (e?.name === 'AbortError') groupRuns.delete(id);
+    else { console.error(e); Object.assign(run, { status: 'error', error: e?.message || String(e), code: e?.code }); }
   }
-  if (s.status === 'stopped') body += `<div class="ai-note">Stopped.</div>`;
-  const notes = [];
-  if (s.status === 'done') {
-    if (!isGroup && s.reason && REASONS[s.reason]) notes.push(esc(REASONS[s.reason]) + (s.reason === 'no-access' ? ' <button class="link" data-act="ai-grant" type="button">Allow page access</button>' : ''));
-    if (s.partial) notes.push('The page is long, so this covers its first part.');
-    if (s.stopped) notes.push('Stopped early.');
-    if (isGroup && s.unreadable?.length) {
-      const noAccess = s.unreadable.some(u => u.reason === 'no-access');
-      notes.push(`Based on titles only for ${s.unreadable.length === 1 ? '1 tab' : `${s.unreadable.length} tabs`} that couldn’t be read: ${s.unreadable.slice(0, 4).map(u => `“${esc(u.title)}”`).join(', ')}${s.unreadable.length > 4 ? '…' : ''}${noAccess ? ' <button class="link" data-act="ai-grant" type="button">Allow page access</button>' : ''}`);
-    }
-    if (isGroup && s.skipped) notes.push(`Used the ${s.engine === 'cloud' ? 20 : 12} most recent tabs; ${s.skipped} more were left out.`);
-  }
-  return `<section class="ai-card${isGroup ? ' group' : ''}" data-sum="${key}" aria-label="${isGroup ? 'Group summary' : 'Tab summary'}" aria-busy="${running}">
-    <div class="ai-head"><span class="ai-title">${IC.spark}${isGroup ? 'What this group is about' : 'Summary'}</span>${engine}${when}<span class="ai-tools">${tools}</span></div>
-    ${body}${notes.length ? `<div class="ai-note">${notes.join('<br>')}</div>` : ''}</section>`;
+  if (state.local !== 'available') refreshState();
+  paint();
 }
 
-const COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>';
-const REFRESH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>';
-const CLOSE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+/* ---------- automatic summaries ---------- */
+
+/**
+ * Called after every refresh with all open tabs. In auto mode, queues tabs that have no
+ * recent summary. Never downloads a model or sends anything to the cloud without consent.
+ */
+export function noticeTabs(items) {
+  const s = state.settings;
+  if (!s.enabled || s.auto === 'off' || !state.access) return;
+  const engine = chooseEngine({ kind: 'tab', setting: s.engine, local: state.local, hasKey: state.hasKey });
+  if (!engine) return;
+  if (engine === 'local' && state.local !== 'available') return;
+  if (engine === 'cloud' && (s.auto !== 'all' || !s.cloudConsentAt)) return;
+  for (const { t } of items) {
+    const url = urlOf(t);
+    if (t.status !== 'complete' || t.discarded || t.frozen || t.incognito || !isReadableUrl(url)) continue;
+    if (queued.has(t.id) || busy.has(t.id) || tabErrors.has(t.id)) continue;
+    const ins = AI.tabInsight(url);
+    if (seen.get(t.id) === url && !needsInsight(ins)) continue;
+    seen.set(t.id, url);
+    enqueue(t.id, false);
+  }
+}
+
+/* ---------- painting ---------- */
+
+let paintTimer = null;
+function schedulePaint() {
+  if (paintTimer) return;
+  paintTimer = setTimeout(() => {
+    paintTimer = null;
+    document.querySelectorAll('[data-ai-tab]').forEach(el => paintTab(+el.dataset.aiTab));
+    document.querySelectorAll('[data-ai-gst]').forEach(el => { const g = ctx.groupById(+el.dataset.aiGst); if (g) el.innerHTML = groupStatusInner(g); });
+    document.querySelectorAll('[data-sum^="group:"]').forEach(el => paintGroup(+el.dataset.sum.split(':')[1]));
+  }, 60);
+}
+
+function paintTab(id) {
+  const x = ctx.tabById(id);
+  if (!x) return;
+  document.querySelectorAll(`[data-ai-tab="${id}"]`).forEach(el => { el.innerHTML = tabLineInner(x.t); });
+  document.querySelectorAll(`[data-ai-st="${id}"]`).forEach(el => { el.innerHTML = tabStatusInner(x.t, el.dataset.compact === '1'); });
+  if (x.owner) document.querySelectorAll(`[data-ai-gst="${x.owner.id}"]`).forEach(el => { el.innerHTML = groupStatusInner(x.owner); });
+}
+
+function paintGroup(id) {
+  const g = ctx.groupById(id);
+  const els = document.querySelectorAll(`[data-sum="group:${id}"]`);
+  if (!g) return;
+  if (!els.length && (groupRuns.has(id) || AI.groupInsight(g.name))) { ctx.renderMain(); return; }
+  els.forEach(el => {
+    if (!groupRuns.has(id) && !AI.groupInsight(g.name)) { el.remove(); return; }
+    el.innerHTML = groupSumInner(g, !el.closest('.card'));
+  });
+}
+
+function ago(at) {
+  if (!at) return '';
+  const m = Math.round((Date.now() - at) / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return `${Math.round(h / 24)} d ago`;
+}
 
 /* ---------- permission + consent dialogs ---------- */
 
 function explainAccess(then) {
   ctx.openModal(`<div class="dialog-head"><h2>Let Tab Desk read the pages you summarize?</h2>
-      <p>To summarize a page, Tab Desk reads its text. It only reads pages when you press Summarize, and never reloads sleeping tabs.</p></div>
-    <div class="dialog-body"><p class="ai-muted">Chrome will ask to “read and change your data on all websites”. Tab Desk only reads text from the tabs you summarize. Without it, summaries use page titles and addresses only.</p></div>
+      <p>To summarize a page, Tab Desk reads its text. It never reloads sleeping tabs.</p></div>
+    <div class="dialog-body"><p class="ai-muted">Chrome will ask to “read and change your data on all websites”. Tab Desk only reads the text of tabs it summarizes. Without it, summaries use page titles and addresses only, and tabs aren’t summarized automatically.</p></div>
     <div class="dialog-foot"><button class="btn" data-m="titles" type="button">Use titles only</button><button class="btn primary" data-m="ok" type="button">Allow page access</button></div>`,
   box => {
     box.querySelector('[data-m=titles]').onclick = async () => {
       ctx.closeModal();
-      await AI.saveSettings({ pageAccessDeclined: true });
-      state.settings = { ...state.settings, pageAccessDeclined: true };
+      state.settings = await AI.saveSettings({ pageAccessDeclined: true });
       then();
     };
     box.querySelector('[data-m=ok]').onclick = () => {
@@ -268,18 +424,10 @@ function explainAccess(then) {
       ctx.closeModal();
       req.then(async ok => {
         state.access = ok;
-        if (!ok) { await AI.saveSettings({ pageAccessDeclined: true }); state.settings = { ...state.settings, pageAccessDeclined: true }; }
+        if (!ok) state.settings = await AI.saveSettings({ pageAccessDeclined: true });
         then();
       });
     };
-  });
-}
-
-function grantAccessThen(then) {
-  AI.requestPageAccess().then(async ok => {
-    state.access = ok;
-    if (ok) { await AI.saveSettings({ pageAccessDeclined: false }); then(); }
-    else ctx.toast('Page access wasn’t granted');
   });
 }
 
@@ -288,22 +436,19 @@ function askCloudConsent(kind, then) {
   ctx.openModal(`<div class="dialog-head"><h2>Send page content to Google Gemini?</h2>
       <p>${kind === 'group' ? 'For a group summary, the text of the readable tabs in the group' : 'The text of this page'} will be sent to Google’s Gemini API using your API key.</p></div>
     <div class="dialog-body ai-muted"><p>Google handles it under the Gemini API terms for your key. On the free tier, Google may use what you send to improve its products. Tab Desk has no server of its own and never sees your data.</p>
-      <p>Summaries sent to Gemini are labeled <span class="ai-engine cloud">Gemini · cloud</span>. You’ll only be asked once; you can turn the cloud off any time in AI settings.</p></div>
+      <p>Summaries made by Gemini are marked <span class="ai-engine cloud">Gemini · cloud</span>. You’ll only be asked once; you can turn the cloud off any time in AI settings.</p></div>
     <div class="dialog-foot">${localOk ? '<button class="btn" data-m="local" type="button">Use on-device instead</button>' : ''}<button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Send to Gemini</button></div>`,
   box => {
     box.querySelector('[data-m=cancel]').onclick = ctx.closeModal;
     box.querySelector('[data-m=local]')?.addEventListener('click', async () => {
       ctx.closeModal();
-      await AI.saveSettings({ engine: 'local' });
-      state.settings = { ...state.settings, engine: 'local' };
+      state.settings = await AI.saveSettings({ engine: 'local' });
       ctx.toast('Summaries will stay on this device. You can change this in AI settings.');
       then();
     });
     box.querySelector('[data-m=ok]').onclick = async () => {
       ctx.closeModal();
-      const at = Date.now();
-      await AI.saveSettings({ cloudConsentAt: at });
-      state.settings = { ...state.settings, cloudConsentAt: at };
+      state.settings = await AI.saveSettings({ cloudConsentAt: Date.now() });
       then();
     };
   });
@@ -318,7 +463,7 @@ export function openGroupInstructions(g) {
       <p>Added to every summary of this group and of the tabs in it. Saved by group name, so it also applies after a restart or when you restore it from Workspaces.</p></div>
     <div class="dialog-body">
       <label class="ai-field"><span>Instructions for this group</span>
-        <textarea id="aiGroupInstr" rows="5" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. This is research for a trip to Japan in April. Focus on prices, dates and opening hours.">${esc(cur)}</textarea></label>
+        <textarea id="aiGroupInstr" rows="5" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. These are my open pull requests. Mark a PR Needs you when a review is requested from me.">${esc(cur)}</textarea></label>
       <div class="ai-muted ai-small">${s.general ? `General instructions also apply: “${esc(s.general.length > 140 ? s.general.slice(0, 140) + '…' : s.general)}”` : 'No general instructions set.'} <button class="link" data-m="general" type="button">Edit general instructions</button></div>
     </div>
     <div class="dialog-foot">${cur ? '<button class="btn danger" data-m="clear" type="button" style="margin-right:auto">Remove</button>' : ''}<button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Save</button></div>`,
@@ -347,30 +492,54 @@ const LOCAL_LABEL = {
   available: 'Ready on this device.',
   downloadable: 'Supported. Chrome needs to download the model once (a few GB) before first use.',
   downloading: 'Chrome is downloading the model…',
-  unavailable: 'Not available here. It needs desktop Chrome 138 or later with enough memory and free disk space, and supports English, Spanish, Japanese, German and French.',
+  unavailable: 'Not available here. It needs desktop Chrome 138 or later with enough memory and free disk space.',
 };
 
-export async function openAiSettings({ focus } = {}) {
+function ruleRow(r = { pattern: '', instructions: '' }) {
+  return `<div class="ai-rule">
+    <div class="ai-rule-top"><input class="ai-rule-pat" type="text" spellcheck="false" value="${esc(r.pattern)}" placeholder="github.com/*/*/pull/*" aria-label="Page pattern">
+      <button class="icon-btn" data-m="rdel" type="button" title="Remove rule" aria-label="Remove rule">${IC.close}</button></div>
+    <div class="ai-rule-count ai-small"></div>
+    <textarea class="ai-rule-ins" rows="2" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. Say whether it’s merged, which checks fail, and whether my review is requested. Needs you if my review is requested.">${esc(r.instructions)}</textarea>
+  </div>`;
+}
+
+function ruleCount(pattern) {
+  const p = pattern.trim();
+  if (!p) return { text: '', bad: false };
+  const m = compilePattern(p);
+  if (!m) return { text: 'Not a valid pattern.', bad: true };
+  const n = ctx.allTabs().filter(({ t }) => m.test(urlOf(t))).length;
+  const kind = m.kind === 'site' ? 'Whole site' : m.kind === 'regex' ? 'Regular expression' : 'Page pattern';
+  return { text: `${kind} · matches ${n === 1 ? '1 open tab' : `${n} open tabs`}`, bad: false };
+}
+
+export async function openAiSettings({ focus, newRule, rulesFor: forUrl } = {}) {
   await refreshState();
   const s = state.settings;
   const key = await AI.getApiKey();
-  const cached = await AI.cacheSize();
+  const saved = await AI.insightCount();
   const groupRows = Object.entries(s.groups);
-  const radio = (v, label, sub) => `<label class="ai-radio"><input type="radio" name="aiEngine" value="${v}" ${s.engine === v ? 'checked' : ''}><span><b>${label}</b><span>${sub}</span></span></label>`;
-  ctx.openModal(`<div class="dialog-head"><h2>AI summaries</h2><p>Summaries run on your device by default. Add your own Gemini API key for better group summaries.</p></div>
+  const rules = [...s.rules];
+  if (newRule != null && !rules.some(r => r.pattern === newRule)) rules.push({ pattern: newRule, instructions: '' });
+  const radio = (name, v, cur, label, sub) => `<label class="ai-radio"><input type="radio" name="${name}" value="${v}" ${cur === v ? 'checked' : ''}><span><b>${label}</b><span>${sub}</span></span></label>`;
+  ctx.openModal(`<div class="dialog-head"><h2>AI summaries</h2><p>One sentence and a status for every tab. Runs on your device by default; add your own Gemini API key for the cloud.</p></div>
     <div class="dialog-body ai-settings">
-      <label class="ai-check"><input type="checkbox" id="aiEnabled" ${s.enabled ? 'checked' : ''}><span>Show Summarize buttons</span></label>
+      <label class="ai-check"><input type="checkbox" id="aiEnabled" ${s.enabled ? 'checked' : ''}><span>Show AI summaries and statuses</span></label>
 
       <h3>Engine</h3>
-      ${radio('auto', 'Auto', 'On-device for tabs when ready. Gemini for groups when you’ve added a key.')}
-      ${radio('local', 'On-device only', 'Nothing leaves your computer.')}
-      ${radio('cloud', 'Gemini API only', 'Always use your Gemini key.')}
-      <div class="ai-status-line"><span class="ai-dot ${state.local}"></span><span>On-device model (Gemini Nano): ${esc(LOCAL_LABEL[state.local] || state.local)}</span>
+      ${radio('aiEngine', 'auto', s.engine, 'Auto', 'On-device for tabs when ready. Gemini for groups when you’ve added a key.')}
+      ${radio('aiEngine', 'local', s.engine, 'On-device only', 'Nothing leaves your computer.')}
+      ${radio('aiEngine', 'cloud', s.engine, 'Gemini API only', 'Always use your Gemini key.')}
+      <div class="ai-status-line"><span class="ai-dot ${state.local}"></span><span>On-device model (Gemini Nano): ${esc(LOCAL_LABEL[state.local] || state.local)}${state.localApi === 'summarizer' ? ' Statuses need Chrome’s Prompt API, which isn’t available here, so on-device summaries come without a status.' : ''}</span>
         ${state.local === 'downloadable' ? '<button class="btn sm" id="aiDownload" type="button">Download</button>' : ''}</div>
       <div class="ai-bar wide" id="aiDlBar" hidden><i></i></div>
 
-      <label class="ai-field"><span>Summary length</span>
-        <select id="aiLength"><option value="short" ${s.length === 'short' ? 'selected' : ''}>Short (3–5 points)</option><option value="medium" ${s.length === 'medium' ? 'selected' : ''}>Medium (5–7 points)</option></select></label>
+      <h3>Summarize tabs automatically</h3>
+      ${radio('aiAuto', 'local', s.auto, 'When it runs on this device', 'New and changed tabs get a summary in the background, using the on-device model only.')}
+      ${radio('aiAuto', 'all', s.auto, 'Always', 'Also uses your Gemini key when that’s the engine for tabs. Each new page is sent to Gemini.')}
+      ${radio('aiAuto', 'off', s.auto, 'Off', 'Only when you press a summarize button.')}
+      ${!state.access ? '<div class="ai-muted ai-small">Automatic summaries need page access (see Privacy below).</div>' : ''}
 
       <h3>Gemini API key <span class="ai-muted">(optional)</span></h3>
       <div class="ai-key-row">
@@ -383,23 +552,49 @@ export async function openAiSettings({ focus } = {}) {
 
       <h3>Custom instructions</h3>
       <label class="ai-field"><span>General instructions, for every summary</span>
-        <textarea id="aiGeneral" rows="4" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. Write in Vietnamese. Keep it brief and mention prices and deadlines if there are any.">${esc(s.general)}</textarea></label>
+        <textarea id="aiGeneral" rows="3" maxlength="${MAX_INSTRUCTIONS}" placeholder="e.g. Write in Vietnamese.">${esc(s.general)}</textarea></label>
+
+      <div class="ai-field" id="aiRulesField"><span>Instructions for sites and pages</span>
+        <div class="ai-muted ai-small">A site (<code>github.com</code>) covers all its pages. A page pattern matches the whole address without https:// — <code>*</code> is one part of the path, <code>**</code> is anything — so <code>github.com/*/*</code> is a repo’s home, <code>github.com/*/*/pulls</code> its pull request list and <code>github.com/*/*/pull/*</code> one pull request. Or write a <code>/regular expression/</code>. Every matching rule applies, top to bottom.</div>
+        <div id="aiRules">${rules.map(ruleRow).join('')}</div>
+        <button class="btn sm" id="aiAddRule" type="button" ${rules.length >= MAX_RULES ? 'disabled' : ''}>+ Add rule</button>
+      </div>
+
       <div class="ai-field"><span>Group instructions</span>
-        ${groupRows.length ? `<ul class="ai-glist">${groupRows.map(([k, v]) => `<li data-gk="${esc(k)}"><b>${esc(k)}</b><span>${esc(v.length > 90 ? v.slice(0, 90) + '…' : v)}</span><button class="icon-btn" data-m="gdel" type="button" title="Remove" aria-label="Remove instructions for ${esc(k)}">${CLOSE}</button></li>`).join('')}</ul>`
-          : '<div class="ai-muted ai-small">None yet. Open a group and choose “AI instructions” from its ⋯ menu or the group summary.</div>'}
+        ${groupRows.length ? `<ul class="ai-glist">${groupRows.map(([k, v]) => `<li data-gk="${esc(k)}"><b>${esc(k)}</b><span>${esc(v.length > 90 ? v.slice(0, 90) + '…' : v)}</span><button class="icon-btn" data-m="gdel" type="button" title="Remove" aria-label="Remove instructions for ${esc(k)}">${IC.close}</button></li>`).join('')}</ul>`
+          : '<div class="ai-muted ai-small">None yet. Open a group and choose “AI instructions” from its ⋯ menu.</div>'}
       </div>
 
       <h3>Privacy</h3>
-      <div class="ai-status-line"><span class="ai-dot ${state.access ? 'available' : 'unavailable'}"></span><span>Page access: ${state.access ? 'Tab Desk can read the text of pages you summarize.' : 'Off. Summaries use titles and addresses only.'}</span>
+      <div class="ai-status-line"><span class="ai-dot ${state.access ? 'available' : 'unavailable'}"></span><span id="aiAccessText">Page access: ${state.access ? 'Tab Desk can read the text of pages it summarizes.' : 'Off. Summaries use titles and addresses only.'}</span>
         <button class="btn sm" id="aiAccess" type="button">${state.access ? 'Revoke' : 'Allow'}</button></div>
-      <div class="ai-status-line"><span>${cached} saved ${cached === 1 ? 'summary' : 'summaries'} on this device.</span><button class="btn sm" id="aiClear" type="button" ${cached ? '' : 'disabled'}>Clear</button></div>
+      <div class="ai-status-line"><span id="aiSavedText">${saved} saved tab ${saved === 1 ? 'summary' : 'summaries'} on this device.</span><button class="btn sm" id="aiClear" type="button" ${saved ? '' : 'disabled'}>Clear</button></div>
       ${s.cloudConsentAt ? '<div class="ai-muted ai-small">You agreed to send page content to Gemini. Removing your key resets this.</div>' : ''}
     </div>
     <div class="dialog-foot"><button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Save</button></div>`,
   box => {
     const $b = sel => box.querySelector(sel);
     const removedGroups = new Set();
+    const wireRule = el => {
+      const pat = el.querySelector('.ai-rule-pat');
+      const count = () => { const c = ruleCount(pat.value); const out = el.querySelector('.ai-rule-count'); out.textContent = c.text; out.classList.toggle('ai-bad', c.bad); };
+      pat.addEventListener('input', count);
+      count();
+      el.querySelector('[data-m=rdel]').onclick = () => { el.remove(); $b('#aiAddRule').disabled = false; };
+    };
+    box.querySelectorAll('.ai-rule').forEach(wireRule);
+    $b('#aiAddRule').onclick = () => {
+      $b('#aiRules').insertAdjacentHTML('beforeend', ruleRow());
+      const el = box.querySelector('.ai-rule:last-child');
+      wireRule(el);
+      el.querySelector('.ai-rule-pat').focus();
+      if (box.querySelectorAll('.ai-rule').length >= MAX_RULES) $b('#aiAddRule').disabled = true;
+    };
     if (focus === 'general') { const g = $b('#aiGeneral'); g.focus(); g.scrollIntoView({ block: 'center' }); }
+    if (newRule != null) {
+      const el = [...box.querySelectorAll('.ai-rule')].find(r => r.querySelector('.ai-rule-pat').value === newRule);
+      if (el) { el.scrollIntoView({ block: 'center' }); el.querySelector('.ai-rule-ins').focus(); el.classList.add('flash'); }
+    } else if (forUrl) $b('#aiRulesField').scrollIntoView({ block: 'center' });
     $b('[data-m=cancel]').onclick = ctx.closeModal;
     $b('#aiKeyShow').onclick = () => { const i = $b('#aiKey'); const show = i.type === 'password'; i.type = show ? 'text' : 'password'; $b('#aiKeyShow').textContent = show ? 'Hide' : 'Show'; };
     $b('#aiKeyTest').onclick = async () => {
@@ -424,18 +619,27 @@ export async function openAiSettings({ focus } = {}) {
       const p = state.access ? AI.revokePageAccess() : AI.requestPageAccess();
       p.then(async () => {
         await refreshAccess();
-        await AI.saveSettings({ pageAccessDeclined: !state.access });
+        state.settings = await AI.saveSettings({ pageAccessDeclined: !state.access });
         e.target.textContent = state.access ? 'Revoke' : 'Allow';
-        e.target.previousElementSibling.textContent = `Page access: ${state.access ? 'Tab Desk can read the text of pages you summarize.' : 'Off. Summaries use titles and addresses only.'}`;
+        $b('#aiAccessText').textContent = `Page access: ${state.access ? 'Tab Desk can read the text of pages it summarizes.' : 'Off. Summaries use titles and addresses only.'}`;
         e.target.parentElement.querySelector('.ai-dot').className = `ai-dot ${state.access ? 'available' : 'unavailable'}`;
       });
     };
-    $b('#aiClear').onclick = async e => { await AI.clearCache(); e.target.disabled = true; e.target.previousElementSibling.textContent = '0 saved summaries on this device.'; };
+    $b('#aiClear').onclick = async e => { await AI.clearInsights(); e.target.disabled = true; $b('#aiSavedText').textContent = 'No saved summaries on this device.'; };
     box.querySelectorAll('[data-m=gdel]').forEach(b => b.onclick = () => { const li = b.closest('li'); removedGroups.add(li.dataset.gk); li.remove(); });
     $b('[data-m=ok]').onclick = async () => {
       const newKey = $b('#aiKey').value.trim();
       // Ask for the Gemini host inside the click, before any await.
       const perm = newKey && newKey !== key ? chrome.permissions.request({ origins: GEMINI_ORIGINS }).catch(() => false) : Promise.resolve(true);
+      const rulesOut = [...box.querySelectorAll('.ai-rule')].map(el => ({ pattern: el.querySelector('.ai-rule-pat').value.trim(), instructions: el.querySelector('.ai-rule-ins').value.trim() }));
+      const bad = rulesOut.find(r => (r.pattern || r.instructions) && (!r.pattern || !r.instructions || !compilePattern(r.pattern)));
+      if (bad) {
+        const el = [...box.querySelectorAll('.ai-rule')].find(x => x.querySelector('.ai-rule-pat').value.trim() === bad.pattern);
+        el?.scrollIntoView({ block: 'center' });
+        el?.classList.add('flash');
+        ctx.toast(!bad.pattern ? 'A rule needs a pattern.' : !bad.instructions ? 'A rule needs instructions.' : 'One rule’s pattern isn’t valid.');
+        return;
+      }
       const groups = { ...state.settings.groups };
       removedGroups.forEach(k => delete groups[k]);
       await perm;
@@ -444,10 +648,11 @@ export async function openAiSettings({ focus } = {}) {
       await AI.saveSettings({
         enabled: $b('#aiEnabled').checked,
         engine: box.querySelector('input[name=aiEngine]:checked')?.value || 'auto',
-        length: $b('#aiLength').value,
+        auto: box.querySelector('input[name=aiAuto]:checked')?.value || 'local',
         model: $b('#aiModel').value.trim() || DEFAULT_MODEL,
         general: $b('#aiGeneral').value.trim(),
         groups,
+        rules: rulesOut.filter(r => r.pattern && r.instructions),
         ...(newKey !== key ? { cloudConsentAt: 0 } : {}),
       });
       await refreshState();
