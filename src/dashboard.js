@@ -4,6 +4,7 @@ import {
 } from './lib/model.js';
 import * as A from './lib/actions.js';
 import { listWorkspaces, onWorkspacesChanged } from './lib/workspaces.js';
+import * as AIUI from './ai-ui.js';
 
 const SELF_URL = chrome.runtime.getURL('dashboard.html');
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
@@ -222,9 +223,10 @@ function tabRow(t, counts) {
     <div class="tab-text"><div class="tab-title"><span class="t">${esc(titleOf(t))}</span>${badges.join('')}</div><div class="tab-url">${urlHtml}</div></div>
     <span class="tab-meta">${ago ? (ago === 'now' ? 'Now' : `${ago} ago`) : ''}</span>
     <div class="tab-actions">
+      ${AIUI.tabSumButton(t)}
       <button class="icon-btn" data-act="move" type="button" title="Move to group" aria-label="Move to group">${ICON.move}</button>
       <button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close tab">${ICON.close}</button>
-    </div></li>`;
+    </div></li>${AIUI.tabSumRow(t)}`;
 }
 
 function bulkBar() {
@@ -260,10 +262,12 @@ function renderMain() {
         <button class="btn ghost" data-act="rename" type="button">${ICON.pen} Rename</button>
         <button class="btn" data-act="color" type="button"><span class="swatch"></span> Color</button>
         <button class="btn" data-act="group-more" type="button" aria-label="More group actions">${ICON.more}</button>
+        ${AIUI.groupSumButtons()}
         <button class="btn" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch to group</button>
         <button class="btn primary" data-act="save-close" type="button" title="Save this group as a workspace and close its tabs">${ICON.save} Save &amp; close</button>
       </div></div>`;
     h += bulkBar();
+    h += AIUI.groupSumCard(g);
     h += `<ul class="tabs">${g.tabs.map(t => tabRow(t, counts)).join('')}</ul>`;
     h += hints();
   } else if (view.kind === 'workspaces') {
@@ -474,6 +478,7 @@ function handleAction(act, row, e) {
       return openMenu(act, m => {
         menuItem(m, '<span>Sort tabs by site</span>', () => perform(async () => ({ msg: 'Sorted tabs by site', undo: await A.sortGroupBySite(g) })));
         menuItem(m, `<span>${g.collapsed ? 'Expand' : 'Collapse'} in tab strip</span>`, () => perform(() => A.setCollapsed(g, !g.collapsed)));
+        AIUI.groupMenuItems(g).forEach(it => menuItem(m, it.html, it.run));
         menuItem(m, '<span>Ungroup (move tabs to Inbox)</span>', () => perform(async () => {
           const undo = await A.ungroupGroup(g);
           view = { kind: 'inbox' };
@@ -489,6 +494,8 @@ function handleAction(act, row, e) {
       const w = ws();
       return perform(async () => ({ msg: `Deleted workspace “${esc(w.name)}”`, undo: await A.deleteWorkspace(w) }));
     }
+    default:
+      if (a.startsWith('ai-')) { e.stopPropagation(); AIUI.handleAiAction(a, act, row, g); }
   }
 }
 
@@ -575,6 +582,7 @@ function commitRename() {
   renaming = false;
   if (g && v !== g.title) {
     const old = g.name;
+    if (v) AIUI.onGroupRenamed(old, v);
     perform(async () => ({ msg: `Renamed “${esc(old)}” to “${esc(v || 'Untitled group')}”`, undo: await A.renameGroup(g, v) }));
   } else finishRename();
 }
@@ -607,6 +615,7 @@ function commands() {
   if (dp) c.push({ type: 'cmd', label: 'Group Inbox tabs by site', sub: `${plural(dp, 'group')} suggested`, ico: ICON.sparkle, run: () => { setView({ kind: 'inbox' }); openByDomain(); } });
   c.push({ type: 'cmd', label: 'Go to Inbox', sub: plural(model.inbox.length, 'ungrouped tab'), ico: ICON.inbox.replace('class="inbox-ico"', ''), run: () => setView({ kind: 'inbox' }) });
   c.push({ type: 'cmd', label: 'Show workspaces', sub: `${workspaces.length} saved`, ico: ICON.stack, run: () => setView({ kind: 'workspaces' }) });
+  c.push(...AIUI.aiCommands(cur));
   c.push({ type: 'cmd', label: cur ? 'Sleep tabs outside this group' : 'Sleep inactive tabs', sub: 'Free memory. Tabs stay open and reload when opened.', ico: ICON.bolt,
     run: () => perform(async () => ({ msg: `Put ${plural(await A.sleepOtherTabs(model, cur?.id), 'tab')} to sleep` })) });
   return c;
@@ -744,6 +753,8 @@ async function start() {
   $('#kbdHint').textContent = `${MOD} K`;
   selfTab = await chrome.tabs.getCurrent();
   workspaces = await listWorkspaces();
+  await AIUI.initAi({ esc, toast, openModal, closeModal, render: () => render(), renderMain: () => renderMain(), tabById, groupById })
+    .catch(e => console.error('AI summaries failed to start', e));
   await refresh();
   // Open on the group you were just working in.
   const recent = allTabs(model).filter(x => x.owner).sort((a, b) => (b.t.lastAccessed || 0) - (a.t.lastAccessed || 0))[0];
