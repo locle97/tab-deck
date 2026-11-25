@@ -81,9 +81,39 @@ function extractInPage() {
   let text = '';
   if (pick) {
     const clone = pick.cloneNode(true);
+    // Icons carry state that text alone misses (a green check next to a reviewer, a yellow dot on a
+    // running check). Turn each icon into a short text label before anything is removed: its own
+    // label or tooltip if it has one, else what its icon name and color mean.
+    const ICON_MEANING = { 'check': 'passed/approved', 'check-circle': 'passed/approved', 'check-circle-fill': 'passed/approved',
+      'x': 'failed', 'x-circle': 'failed', 'x-circle-fill': 'failed', 'stop': 'failed', 'dot-fill': 'pending', 'dot': 'pending',
+      'clock': 'waiting', 'hourglass': 'waiting', 'sync': 'in progress', 'skip': 'skipped', 'skip-fill': 'skipped',
+      'file-diff': 'changes requested', 'request-changes': 'changes requested', 'eye': 'review requested', 'comment': 'commented',
+      'git-merge': 'merged', 'git-pull-request': 'open pull request', 'git-pull-request-closed': 'closed pull request',
+      'git-pull-request-draft': 'draft pull request', 'issue-opened': 'open issue', 'issue-closed': 'closed issue',
+      'alert': 'warning', 'alert-fill': 'warning', 'blocked': 'blocked', 'circle-slash': 'blocked', 'lock': 'locked' };
+    const COLOR = { success: 'green', danger: 'red', attention: 'yellow', severe: 'orange', done: 'purple', accent: 'blue', open: 'green', closed: 'red' };
+    const iconText = el => {
+      const own = (el.getAttribute('aria-label') || el.querySelector?.('title')?.textContent || el.getAttribute('title') || el.getAttribute('alt') || '').replace(/\s+/g, ' ').trim();
+      const cls = `${el.getAttribute('class') || ''} ${el.parentElement?.getAttribute('class') || ''}`;
+      const name = /octicon-([a-z0-9-]+?)(?:-\d+)?(?=\s|$)/.exec(cls)?.[1] || '';
+      const color = Object.entries(COLOR).find(([k]) => new RegExp(`(color-fg-|fgColor-|text-|-)${k}\\b`).test(cls))?.[1] || '';
+      const spinning = /anim-rotate|spinner|animate-spin/.test(cls);
+      const meaning = own || ICON_MEANING[name] || (spinning ? 'in progress' : '');
+      if (!meaning || meaning.length > 80) return '';
+      return ` [icon: ${meaning}${color && !own ? `, ${color}` : ''}] `;
+    };
+    // Short labels on elements with no visible text (icon buttons, status links).
+    clone.querySelectorAll('[aria-label]:not(svg):not(img)').forEach(el => {
+      if (!el.textContent.trim()) { const v = el.getAttribute('aria-label').trim(); if (v && v.length <= 80) el.append(` [${v}] `); }
+    });
+    clone.querySelectorAll('svg, img, [role=img]').forEach(el => {
+      if (el.closest('svg') && el.closest('svg') !== el) return;
+      const t = el.tagName === 'IMG' && !el.getAttribute('alt') ? '' : iconText(el);
+      el.replaceWith(document.createTextNode(t));
+    });
     // Drop page chrome, but keep <form> and in-page <header>: apps put real state in them
     // (GitHub's merge box and review status, a PR's title and Open/Merged badge).
-    clone.querySelectorAll('nav, footer, aside, script, style, noscript, template, svg, iframe, [role=navigation], [role=contentinfo], [aria-hidden=true], [hidden]').forEach(n => n.remove());
+    clone.querySelectorAll('nav, footer, aside, script, style, noscript, template, svg, iframe, textarea, select, dialog, [role=navigation], [role=contentinfo], [role=dialog], [role=menu], [popover]:not(tool-tip), [aria-hidden=true], [hidden]').forEach(n => n.remove());
     // innerText needs layout; a detached clone has none, so fall back to textContent with block breaks.
     clone.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, br, div, section, tr, header, form').forEach(n => n.append('\n'));
     text = clone.textContent || '';

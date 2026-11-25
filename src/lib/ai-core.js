@@ -282,7 +282,7 @@ export function userInstructionBlock(instructions) {
 const STATUS_GUIDE = STATUS_ORDER.map(k => `"${k}" (${STATUSES[k].label}): ${STATUSES[k].hint}`).join('\n');
 
 /** Bump when the tab prompt or schema changes, so saved summaries are redone with the new one. */
-export const PROMPT_VERSION = 4;
+export const PROMPT_VERSION = 5;
 
 // "facts" comes first on purpose: the model writes down the page's own state before it summarizes,
 // then picks the status, so the summary and the status are drawn from the same facts.
