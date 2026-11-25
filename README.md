@@ -3,6 +3,8 @@
 A Chrome extension page for people who keep many tab groups open. It replaces squinting at the tab strip with:
 
 - **Group sidebar.** Every open tab group with its color and tab count, plus an **Inbox** of ungrouped tabs.
+  - Drag a group up or down to reorder it. The real tab groups move in Chrome's tab strip too (across windows as well). With a group focused, `Alt+↑` / `Alt+↓` does the same from the keyboard.
+  - Click the chevron next to a group to list its tabs under it. Click a tab there to switch to it.
 - **Group detail.** The selected group's tabs with favicon, title, URL and badges (Active, Playing, Duplicate, Sleeping, Pinned). Rename, recolor, sort by site, collapse, ungroup, move or close tabs, alone or several at once.
 - **Switch to group.** Expands the group, collapses the other groups in that window and opens its most recent tab.
 - **Workspaces.** *Save & close* stores a group (name, color, URLs) and closes its tabs. *Restore* reopens it as a group later.

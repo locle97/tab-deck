@@ -65,8 +65,47 @@ try {
 
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'group.png') });
 
+  // Expand a group in the sidebar to list its tabs, then switch to one.
+  await page.click('[data-gid]:has-text("Checkout redesign") .chev');
+  await page.waitForFunction(() => document.querySelectorAll('.nav-tabs .nav-tab').length === 3);
+  assert.equal(await page.getAttribute('[data-gid]:has-text("Checkout redesign") .chev', 'aria-expanded'), 'true');
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'sidebar-expanded.png') });
+  await page.click('.nav-tab:has-text("/pr/1284")');
+  await page.waitForFunction(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.url.endsWith('/pr/1284'));
+  await page.bringToFront();
+  step('expand a group in the sidebar and switch to one of its tabs');
+
+  // Drag a group to reorder it; the real tab strip follows.
+  const sideOrder = () => page.$$eval('[data-nav=group] .name', ns => ns.map(n => n.textContent));
+  const stripOrder = () => page.evaluate(async () => {
+    const [tabs, groups] = await Promise.all([chrome.tabs.query({ currentWindow: true }), chrome.tabGroups.query({})]);
+    const ids = [...new Set(tabs.sort((a, b) => a.index - b.index).map(t => t.groupId).filter(id => id !== -1))];
+    return ids.map(id => groups.find(g => g.id === id).title);
+  });
+  const waitSide = names => page.waitForFunction(n => JSON.stringify([...document.querySelectorAll('[data-nav=group] .name')].map(x => x.textContent)) === n, JSON.stringify(names));
+  assert.deepEqual(await stripOrder(), ['Checkout redesign', 'Incident 4821']);
+  await page.locator('[data-gid]:has-text("Incident 4821") .nav-row').dragTo(page.locator('[data-gid]:has-text("Checkout redesign") .nav-row'), { targetPosition: { x: 40, y: 3 } });
+  await waitSide(['Incident 4821', 'Checkout redesign']);
+  assert.deepEqual(await stripOrder(), ['Incident 4821', 'Checkout redesign']);
+  step('drag a group up in the sidebar moves it in the tab strip');
+
+  await page.click('.toast button');
+  await waitSide(['Checkout redesign', 'Incident 4821']);
+  assert.deepEqual(await stripOrder(), ['Checkout redesign', 'Incident 4821']);
+  step('undo the group move');
+
+  // Drag down (past an expanded group) and back with the keyboard.
+  await page.locator('[data-gid]:has-text("Checkout redesign") .nav-row').dragTo(page.locator('[data-gid]:has-text("Incident 4821") .nav-row'), { targetPosition: { x: 40, y: 26 } });
+  await waitSide(['Incident 4821', 'Checkout redesign']);
+  assert.deepEqual(await stripOrder(), ['Incident 4821', 'Checkout redesign']);
+  await page.focus('[data-nav=group]:has-text("Checkout redesign")');
+  await page.keyboard.press('Alt+ArrowUp');
+  await waitSide(['Checkout redesign', 'Incident 4821']);
+  assert.deepEqual(await stripOrder(), ['Checkout redesign', 'Incident 4821']);
+  step('drag a group down, and Alt+Up moves it back');
+
   // Rename + color.
-  await page.click('[data-nav=group]:nth-of-type(1)');
+  await page.click('[data-nav=group]:has-text("Checkout redesign")');
   await page.click('[data-act=rename]');
   await page.fill('#renameInput', 'Checkout v3');
   await page.keyboard.press('Enter');
