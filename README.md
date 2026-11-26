@@ -2,6 +2,9 @@
 
 A Chrome extension page for people who keep many tab groups open. It replaces squinting at the tab strip with:
 
+- **Side panel.** Clicking the toolbar icon (or `Alt+Shift+D`) opens Tab Desk in Chrome's side panel, so you can keep an eye on every group's progress while you work in one tab. It shows the dashboard cards in one column: each group's status pill and status bar, its summary, its first tabs with their status edges and summaries, and the Inbox. Statuses update live as summaries finish, whether they run in the panel or in the full page. Click a tab to switch to it; click a status edge to change it. On top: the counts, **Full dashboard** (opens or focuses the full Tab Desk page), the sort menu, *Summarize all*, search and settings. Clicking a group's name, *Open details* or the Inbox opens that view in the full page. The panel stays open as you switch tabs.
+  - The full page opens from the panel, from the icon's right-click menu (*Open full dashboard*), or with `Alt+Shift+F`. On the full page, the panel icon at the right of the header opens the side panel.
+  - When the full page is open, it runs the automatic summaries, so the panel doesn't do the same work twice.
 - **Dashboard.** Every open tab group on one page as a grid of cards, so you can keep track of several projects at once.
   - **Header bar.** On the left, the number of groups and tabs. On the right: a sort menu (*Most urgent*, *Recently used*, *Tab strip order*), a grid/list toggle, *Summarize all* and *Search* (`Ctrl+K`). Sort and layout are remembered.
   - **Cards.** A header tinted with the group's color holds the name and one status pill (e.g. *Done · 2*). A thin bar under it shows how many tabs have each status. The group's AI summary is one muted line (click it to read it all; refresh and edit show on hover). Each tab row shows its status as a colored left edge (click it to change the status), the title, the site in faint text, and Summarize / Move / Close on hover; sleeping tabs are dimmed. A small footer has the tab count, sites, last use and *2 of 4 done*. *Switch* and *⋯* (which holds *Summarize group and tabs*, Save & close, color, sort, collapse, ungroup and close) show on hover.
@@ -39,9 +42,9 @@ Most actions can be undone from the toast that follows them.
 
 1. Open `chrome://extensions` and turn on **Developer mode**.
 2. Click **Load unpacked** and choose the `src/` folder.
-3. Click the Tab Desk toolbar icon, or press `Alt+Shift+D`. `Alt+Shift+K` opens Tab Desk with the palette ready. You can change both at `chrome://extensions/shortcuts`.
+3. Click the Tab Desk toolbar icon, or press `Alt+Shift+D`, to open the side panel. `Alt+Shift+F` opens the full page, and `Alt+Shift+K` opens it with the palette ready. Right-click the icon for *Open full dashboard*. You can change the shortcuts at `chrome://extensions/shortcuts`.
 
-Requires Chrome 121 or later (AI summaries on-device need Chrome 138+). Permissions: `tabs` and `tabGroups` to read and manage tabs, `storage` for saved workspaces and settings, `favicon` to show site icons, `scripting` to read the text of a page you summarize. Access to page content (`<all_urls>`) and to the Gemini API are optional and only requested when you first use them.
+Requires Chrome 121 or later (AI summaries on-device need Chrome 138+). Permissions: `tabs` and `tabGroups` to read and manage tabs, `storage` for saved workspaces and settings, `favicon` to show site icons, `scripting` to read the text of a page you summarize, `sidePanel` for the side panel, `contextMenus` for the icon's right-click menu. Access to page content (`<all_urls>`) and to the Gemini API are optional and only requested when you first use them.
 
 ## Development
 
@@ -50,8 +53,9 @@ No build step. The code is plain ES modules:
 | Path | What it does |
 | --- | --- |
 | `src/manifest.json` | Manifest V3 |
-| `src/background.js` | Opens or focuses the Tab Desk page |
+| `src/background.js` | Makes the toolbar icon open the side panel; opens or focuses the full Tab Desk page |
 | `src/dashboard.html`, `.css`, `.js` | The Tab Desk page |
+| `src/panel.html` | The side panel: the same page and code in a compact, dashboard-only mode |
 | `src/lib/model.js` | Pure helpers: building the view model, duplicates, site grouping, fuzzy search |
 | `src/lib/actions.js` | Every change made to real tabs, each returning an undo function |
 | `src/lib/workspaces.js` | Saved workspaces in `chrome.storage.local` |

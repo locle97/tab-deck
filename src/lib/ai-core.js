@@ -515,6 +515,24 @@ export function cacheKey(parts) {
 export const CACHE_TTL = 7 * 24 * 3600 * 1000;
 export const CACHE_MAX = 300;
 
+/**
+ * Saved summaries are shared by every Tab Desk page that is open (the full page and side panels),
+ * each holding a copy and writing the whole map. When another page writes, take its map but keep
+ * our own changes it doesn't have yet. `dirty` is the set of keys this page changed and hasn't seen
+ * in storage; keys that storage now holds as we have them are removed from it. `resave` says the
+ * merged map has changes the other page lacks, so this page should write it back.
+ */
+export function mergeRemote(remote, local, dirty) {
+  const merged = { ...(remote || {}) };
+  let resave = false;
+  for (const k of [...dirty]) {
+    if (JSON.stringify(merged[k]) === JSON.stringify(local?.[k])) { dirty.delete(k); continue; }
+    if (local && k in local) merged[k] = local[k]; else delete merged[k];
+    resave = true;
+  }
+  return { merged, resave };
+}
+
 /** Drop expired entries and keep the newest CACHE_MAX. Returns a new object. */
 export function pruneCache(cache, now = Date.now(), ttl = CACHE_TTL, max = CACHE_MAX) {
   const live = Object.entries(cache || {}).filter(([, v]) => v && now - (v.at || 0) < ttl);

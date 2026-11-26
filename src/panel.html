@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab Desk</title>
+<!-- The side panel: the same page as dashboard.html in a compact, dashboard-only mode (see PANEL in dashboard.js). -->
+<link rel="icon" href="icons/icon32.png">
+<link rel="stylesheet" href="dashboard.css">
+</head>
+<body class="panel">
+<div class="app">
+  <aside class="side" aria-label="Tab groups">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i style="background:var(--g-blue)"></i><i style="background:var(--g-purple)"></i><i style="background:var(--g-green)"></i><i style="background:var(--g-orange)"></i></span>
+      <span class="brand-name">Tab Desk</span>
+      <span class="brand-stat" id="brandStat"></span>
+    </div>
+    <button class="search-btn" id="openPalette" type="button">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <span>Jump to tab or group</span><kbd id="kbdHint">Ctrl K</kbd>
+    </button>
+    <nav class="nav" id="nav"></nav>
+    <div class="side-foot">
+      <button class="dup-btn" id="dupBtn" type="button"></button>
+      <button class="settings-btn" id="settingsBtn" type="button" title="Settings: AI summaries and summary instructions"><span>Settings</span></button>
+    </div>
+    <div class="side-resizer" id="sideResizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" title="Drag to resize. Double-click to reset."></div>
+  </aside>
+  <main class="main" id="main"></main>
+</div>
+
+<div class="overlay" id="pal" hidden>
+  <div class="dialog palette" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="pal-input-row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <span class="pal-mode" id="palMode" hidden></span>
+      <input id="palInput" type="text" autocomplete="off" spellcheck="false" aria-controls="palList">
+    </div>
+    <div class="pal-list" id="palList" role="listbox"></div>
+    <div class="pal-foot" id="palFoot"></div>
+  </div>
+</div>
+
+<div class="overlay" id="modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" id="modalBox"></div>
+</div>
+
+<script type="module" src="dashboard.js"></script>
+</body>
+</html>

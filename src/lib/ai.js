@@ -7,7 +7,7 @@ import {
   DEFAULT_SETTINGS, normalizeSettings, instructionsFor, chooseEngine, cleanText, langCode,
   isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
   baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
-  cacheKey, fnv, pruneCache, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
+  cacheKey, fnv, pruneCache, mergeRemote, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
   insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
   sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES,
 } from './ai-core.js';
@@ -226,6 +226,7 @@ export async function extractTab(tab, { access, fields = null }) {
 // restart. Group insights are keyed by group name, like group instructions.
 
 let insights = null, groupInsights = null;
+const dirtyTabs = new Set(), dirtyGroups = new Set(); // keys changed here and not yet seen in storage
 const listeners = new Set();
 export function onInsightsChanged(cb) { listeners.add(cb); }
 const emit = () => listeners.forEach(cb => { try { cb(); } catch {} });
@@ -235,11 +236,28 @@ export async function loadInsights() {
     const r = await chrome.storage.local.get([INSIGHTS_KEY, GROUP_INSIGHTS_KEY]);
     insights = r[INSIGHTS_KEY] || {};
     groupInsights = r[GROUP_INSIGHTS_KEY] || {};
+    chrome.storage.onChanged.addListener(onStorageChanged);
   }
   return { insights, groupInsights };
 }
 export const tabInsight = url => insights?.[insightKey(url)] || null;
 export const groupInsight = name => groupInsights?.[groupKey(name)] || null;
+
+// Another Tab Desk page (the full page, or a side panel) saved summaries or statuses: show them here.
+function onStorageChanged(changes, area) {
+  if (area !== 'local' || !insights) return;
+  let resave = false, changed = false;
+  if (INSIGHTS_KEY in changes) {
+    const r = mergeRemote(changes[INSIGHTS_KEY].newValue, insights, dirtyTabs);
+    insights = r.merged; resave ||= r.resave; changed = true;
+  }
+  if (GROUP_INSIGHTS_KEY in changes) {
+    const r = mergeRemote(changes[GROUP_INSIGHTS_KEY].newValue, groupInsights, dirtyGroups);
+    groupInsights = r.merged; resave ||= r.resave; changed = true;
+  }
+  if (resave) scheduleSave();
+  if (changed) emit();
+}
 
 // Write right away (a page can close at any moment), but never more than one write at a time.
 let saving = false, dirty = false;
@@ -258,6 +276,7 @@ function putInsight(url, data) {
   const k = insightKey(url);
   const prev = insights[k] || {};
   insights[k] = { ...prev, ...data, at: Date.now() };
+  dirtyTabs.add(k);
   scheduleSave();
   emit();
   return insights[k];
@@ -269,17 +288,20 @@ export async function setManualStatus(url, status) {
   const prev = insights[k] || { at: Date.now() };
   insights[k] = { ...prev, manual: normalizeStatus(status) || undefined };
   if (!insights[k].manual) delete insights[k].manual;
+  dirtyTabs.add(k);
   scheduleSave();
   emit();
 }
 export async function clearGroupInsight(name) {
   await loadInsights();
   delete groupInsights[groupKey(name)];
+  dirtyGroups.add(groupKey(name));
   scheduleSave();
   emit();
 }
 export async function clearInsights() {
   insights = {}; groupInsights = {};
+  dirtyTabs.clear(); dirtyGroups.clear();
   await chrome.storage.local.remove([INSIGHTS_KEY, GROUP_INSIGHTS_KEY, CACHE_KEY]);
   emit();
 }
@@ -666,6 +688,7 @@ export async function summarizeGroup(group, opts = {}) {
   const summary = oneSentence(text, 300);
   if (!summary) throw new AiError('The AI returned an empty summary.', 'empty');
   groupInsights[groupKey(group.name)] = { summary, engine, sig, unreadable, skipped, at: Date.now() };
+  dirtyGroups.add(groupKey(group.name));
   scheduleSave();
   emit();
   return groupInsights[groupKey(group.name)];

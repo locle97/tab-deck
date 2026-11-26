@@ -2,24 +2,29 @@
   "manifest_version": 3,
   "name": "Tab Desk",
   "version": "0.1.0",
-  "description": "Manage tab groups from one page: switch groups, save them as workspaces, and jump anywhere with Ctrl+K.",
+  "description": "Manage tab groups from the side panel or a full page: watch every group's status, switch groups, save them as workspaces, and jump anywhere with Ctrl+K.",
   "minimum_chrome_version": "121",
-  "permissions": ["tabs", "tabGroups", "storage", "favicon", "scripting"],
+  "permissions": ["tabs", "tabGroups", "storage", "favicon", "scripting", "sidePanel", "contextMenus"],
   "optional_host_permissions": ["<all_urls>", "https://generativelanguage.googleapis.com/*"],
   "background": { "service_worker": "background.js", "type": "module" },
+  "side_panel": { "default_path": "panel.html" },
   "action": {
-    "default_title": "Open Tab Desk",
+    "default_title": "Open the Tab Desk side panel",
     "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" }
   },
   "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "commands": {
     "_execute_action": {
       "suggested_key": { "default": "Alt+Shift+D" },
-      "description": "Open Tab Desk"
+      "description": "Open the Tab Desk side panel"
+    },
+    "open-dashboard": {
+      "suggested_key": { "default": "Alt+Shift+F" },
+      "description": "Open the full Tab Desk dashboard"
     },
     "open-palette": {
       "suggested_key": { "default": "Alt+Shift+K" },
-      "description": "Open Tab Desk with the search palette"
+      "description": "Open the full Tab Desk dashboard with the search palette"
     }
   }
 }
