@@ -146,6 +146,72 @@ try {
   assert.deepEqual(await stripOrder(), ['Checkout redesign', 'Incident 4821']);
   step('drag a group down, and Alt+Up moves it back');
 
+  // Dashboard: drag tabs within a card, between cards and to and from the Inbox row; drag cards.
+  await page.click('[data-nav=dashboard]');
+  await page.waitForSelector('.card[data-card]');
+  const groupPaths = title => page.evaluate(async t => {
+    const g = (await chrome.tabGroups.query({ title: t }))[0];
+    const tabs = await chrome.tabs.query({ groupId: g.id });
+    return tabs.sort((a, b) => a.index - b.index).map(x => new URL(x.url).pathname);
+  }, title);
+  const waitPaths = async (title, paths) => {
+    for (let k = 0; k < 40; k++) { if (JSON.stringify(await groupPaths(title)) === JSON.stringify(paths)) return; await page.waitForTimeout(50); }
+    assert.deepEqual(await groupPaths(title), paths);
+  };
+  const cardTab = (group, path) => page.locator(`.card:has-text("${group}") .card-tab:has-text("Page ${path}")`);
+  const edge = async (loc, place) => { const b = await loc.boundingBox(); return { x: 40, y: place === 'before' ? 2 : b.height - 2 }; };
+  const undoToast = async () => { await page.click('.toast button'); await page.waitForSelector('.toast:has-text("Undone")'); };
+
+  await cardTab('Checkout redesign', '/docs').dragTo(cardTab('Checkout redesign', '/checkout'), { targetPosition: await edge(cardTab('Checkout redesign', '/checkout'), 'before') });
+  await waitPaths('Checkout redesign', ['/docs', '/checkout', '/pr/1284']);
+  await page.waitForFunction(() => document.querySelector('.card .card-tab .t')?.textContent === 'Page /docs');
+  step('drag a tab up inside a card reorders it in the tab strip');
+  await undoToast();
+  await waitPaths('Checkout redesign', ['/checkout', '/pr/1284', '/docs']);
+  step('undo the tab reorder');
+
+  await cardTab('Incident 4821', '/logs').dragTo(cardTab('Checkout redesign', '/pr/1284'), { targetPosition: await edge(cardTab('Checkout redesign', '/pr/1284'), 'after') });
+  await waitPaths('Checkout redesign', ['/checkout', '/pr/1284', '/logs', '/docs']);
+  await waitPaths('Incident 4821', ['/incident']);
+  step('drag a tab into another card, between two of its tabs');
+  await undoToast();
+  await waitPaths('Incident 4821', ['/incident', '/logs']);
+  await waitPaths('Checkout redesign', ['/checkout', '/pr/1284', '/docs']);
+
+  await page.waitForFunction(() => document.querySelectorAll('.card:has(.card-name[title*="Incident"]) .card-tab').length === 2);
+  await page.locator('.inbox-tab:has-text("Page /news/1")').dragTo(page.locator('.card:has-text("Incident 4821") .card-meta'));
+  await waitPaths('Incident 4821', ['/incident', '/logs', '/news/1']);
+  await page.waitForFunction(() => document.querySelectorAll('.card:has(.card-name[title*="Incident"]) .card-tab').length === 3);
+  step('drag an Inbox tab onto a card adds it to that group');
+  await cardTab('Incident 4821', '/news/1').dragTo(page.locator('.inbox-open'));
+  await waitPaths('Incident 4821', ['/incident', '/logs']);
+  await page.waitForSelector('.inbox-tab:has-text("Page /news/1")');
+  step('drag a tab onto the Inbox row ungroups it');
+
+  // Cards sit side by side: dropping on the left half of a card puts the group before it.
+  await page.locator('.card:has-text("Incident 4821") .card-head').dragTo(page.locator('.card:has-text("Checkout redesign") .card-meta'), { targetPosition: { x: 4, y: 4 } });
+  await waitSide(['Incident 4821', 'Checkout redesign']);
+  assert.deepEqual(await stripOrder(), ['Incident 4821', 'Checkout redesign']);
+  assert.deepEqual(await page.$$eval('.card .card-name', ns => ns.map(n => n.textContent)), ['Incident 4821', 'Checkout redesign']);
+  assert.match(await page.textContent('[data-act=sort]'), /Tab strip order/);
+  step('drag a card by its header reorders the group in the tab strip');
+  await undoToast();
+  await waitSide(['Checkout redesign', 'Incident 4821']);
+
+  // Group page: drag rows, and Alt+Down moves the focused tab.
+  await page.click('[data-nav=group]:has-text("Checkout redesign")');
+  const row = path => page.locator(`.tabs .tab:has-text("Page ${path}")`);
+  await row('/checkout').dragTo(row('/docs'), { targetPosition: await edge(row('/docs'), 'after') });
+  await waitPaths('Checkout redesign', ['/pr/1284', '/docs', '/checkout']);
+  await page.waitForFunction(() => document.querySelector('.tabs .tab:last-child .t')?.textContent === 'Page /checkout');
+  await page.focus('.tabs .tab:has-text("Page /checkout") input');
+  await page.keyboard.press('Alt+ArrowUp');
+  await waitPaths('Checkout redesign', ['/pr/1284', '/checkout', '/docs']);
+  await page.waitForFunction(() => document.activeElement?.closest('.tab')?.textContent.includes('Page /checkout'));
+  await page.keyboard.press('Alt+ArrowUp');
+  await waitPaths('Checkout redesign', ['/checkout', '/pr/1284', '/docs']);
+  step('drag a row on the group page, and Alt+Up moves it back');
+
   // Rename + color.
   await page.click('[data-nav=group]:has-text("Checkout redesign")');
   await page.click('[data-act=rename]');
@@ -269,6 +335,16 @@ try {
   assert.equal(await panel.$$eval('.card', c => c.length), await page.$$eval('.card', c => c.length));
   if (SHOTS) await panel.screenshot({ path: join(SHOTS, 'side-panel.png') });
   step('side panel shows the groups as one column of cards');
+
+  // Drag a tab in the panel: the full page follows from Chrome's tab events.
+  await page.click('[data-nav=dashboard]');
+  const cid = await panel.$$eval('.card[data-card]', cs => cs.find(c => c.querySelectorAll('.card-tab').length >= 2).dataset.card);
+  const pTabs = panel.locator(`.card[data-card="${cid}"] .card-tab`);
+  const second = await pTabs.nth(1).locator('.t').textContent();
+  await pTabs.nth(1).dragTo(pTabs.nth(0), { targetPosition: { x: 40, y: 2 } });
+  await panel.waitForFunction(([c, t]) => document.querySelector(`.card[data-card="${c}"] .card-tab .t`)?.textContent === t, [cid, second]);
+  await page.waitForFunction(([c, t]) => document.querySelector(`.card[data-card="${c}"] .card-tab .t`)?.textContent === t, [cid, second]);
+  step('drag a tab in the side panel; the full page shows the new order');
 
   // "Full dashboard" focuses the existing Tab Desk tab; a group name opens that group there.
   const dashTabs = () => sw.evaluate(async url => (await chrome.tabs.query({})).filter(t => t.url.startsWith(url)).length, `chrome-extension://${extId}/dashboard.html`);

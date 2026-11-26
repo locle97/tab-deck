@@ -1,7 +1,7 @@
 import {
   COLORS, COLOR_NAMES, buildModel, allTabs, findDuplicates, duplicateCount, domainProposals,
   hostOf, shortUrl, siteName, plural, timeAgo, nextColor, score, savedLabel, groupMoveTarget, neighborMove,
-  cardTabs, groupFacts, lastUsed, sortGroups, sortTabsBy, statusSegments,
+  cardTabs, groupFacts, lastUsed, sortGroups, sortTabsBy, statusSegments, tabMoveIndex,
 } from './lib/model.js';
 import * as A from './lib/actions.js';
 import { listWorkspaces, onWorkspacesChanged } from './lib/workspaces.js';
@@ -24,7 +24,7 @@ let selected = new Set();
 let renaming = false;
 let deferred = false;
 let fullPageOpen = false;
-let dragging = null; // id of the group being dragged in the sidebar
+let drag = null; // what is being dragged: {kind: 'group', id} or {kind: 'tab', ids}
 const showAllTabs = new Set(); // dashboard cards opened up to list every tab
 
 
@@ -57,7 +57,7 @@ async function refresh() {
   if (view.kind === 'group' && !groupById(view.id)) {
     view = model.groups[0] ? { kind: 'group', id: model.groups[0].id } : { kind: 'inbox' };
   }
-  if (renaming || dragging != null) { deferred = true; return; }
+  if (renaming || drag) { deferred = true; return; }
   render();
   if (!$('#pal').hidden) renderPalette();
   // Automatic summaries run in the full page when it is open, so the panel doesn't do the same work twice.
@@ -159,16 +159,42 @@ const doRestore = ws => perform(async () => {
 const doFocus = g => perform(() => A.focusGroup(g, model));
 
 /** Move group `id` before or after group `targetId`, in the real tab strip. */
-function doMoveGroup(id, targetId, place, refocus = false) {
+function doMoveGroup(id, targetId, place, { refocus = false, fromDashboard = false } = {}) {
   const g = groupById(id);
   const to = g && groupMoveTarget(model.groups, id, targetId, place);
   if (!to) return;
   const crossWindow = to.windowId !== g.windowId;
+  const sorted = fromDashboard && useStripOrder(sortMode() !== 'manual');
   perform(async () => {
     const undo = await A.moveGroup(g, to);
-    return { msg: `Moved “${esc(g.name)}”${crossWindow ? ' to another window' : ''}`, undo };
+    return { msg: `Moved “${esc(g.name)}”${crossWindow ? ' to another window' : ''}${sorted ? SORTED_NOTE : ''}`, undo };
   }).then(() => { if (refocus) document.querySelector(`[data-nav=group][data-id="${id}"]`)?.focus(); });
 }
+
+/**
+ * Drop tabs into a group (groupId -1 is the Inbox), optionally before or after another tab.
+ * `reorder` is true for a drop on a dashboard card's tab list while it's sorted by status.
+ */
+function doPlaceTabs(ids, target, { reorder = false, refocus = null } = {}) {
+  const into = ids.some(id => ownerId(id) !== target.groupId);
+  const label = target.groupId === -1 ? 'Inbox' : `“${esc(groupById(target.groupId)?.name)}”`;
+  const sorted = reorder && useStripOrder(true);
+  perform(async () => {
+    const undo = await A.placeTabs(ids, target);
+    selected.clear();
+    return { msg: `Moved ${plural(ids.length, 'tab')}${into ? ` to ${label}` : ''}${sorted ? SORTED_NOTE : ''}`, undo };
+  }).then(() => { if (refocus != null) document.querySelector(`.tabs [data-dtab="${refocus}"] input`)?.focus(); });
+}
+
+/** After a drag that sets an order, show the dashboard in tab strip order so the result is visible. */
+const SORTED_NOTE = '. Now sorted by tab strip order';
+function useStripOrder(needed) {
+  if (!needed || view.kind !== 'dashboard') return false;
+  dash.sort = 'manual';
+  saveDash();
+  return true;
+}
+const ownerId = id => { const x = tabById(id); return x ? (x.owner ? x.owner.id : -1) : null; };
 
 /* ---------- favicons ---------- */
 function hash(s) { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); }
@@ -178,7 +204,7 @@ function fav(url = '') {
   const key = parts.length > 2 ? parts[parts.length - 2] : parts[0] || '?';
   const hue = hash(key) % 360;
   const img = /^https?:/.test(url)
-    ? `<img src="${esc(chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(url)}&size=32`))}" alt="" loading="lazy">`
+    ? `<img src="${esc(chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(url)}&size=32`))}" alt="" loading="lazy" draggable="false">`
     : '';
   return `<span class="fav" style="background:hsl(${hue} 52% 44%)" aria-hidden="true">${esc((key[0] || '?').toUpperCase())}${img}</span>`;
 }
@@ -227,7 +253,7 @@ function renderSide() {
   if (!model.groups.length) h += `<div class="mock-note" style="padding:4px 8px">No tab groups yet. Select tabs in the Inbox and move them to a new group.</div>`;
   model.groups.forEach((g, i) => {
     const open = expanded.has(g.id);
-    h += `<div class="nav-group${dragging === g.id ? ' is-dragging' : ''}" data-gid="${g.id}" style="--c:${cvar(g.color)}">
+    h += `<div class="nav-group" data-gid="${g.id}" style="--c:${cvar(g.color)}">
       <div class="nav-row" draggable="true" title="Drag to reorder. Alt+↑/↓ moves the group in the tab strip.">
       <button class="chev" data-side="toggle" type="button" aria-expanded="${open}" aria-label="${open ? 'Hide' : 'Show'} tabs in ${esc(g.name)}">${ICON.chev}</button>
       <button class="nav-item" data-nav="group" data-id="${g.id}" aria-current="${cur('group', g.id)}" type="button" title="${esc(g.name)}">
@@ -235,7 +261,7 @@ function renderSide() {
     if (open) {
       h += `<ul class="nav-tabs">${g.tabs.map(t => {
         const url = t.url || t.pendingUrl || '';
-        return `<li><button class="nav-tab${t.active ? ' is-active' : ''}" data-side-tab="${t.id}" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="name">${esc(titleOf(t))}</span></button></li>`;
+        return `<li><button class="nav-tab${t.active ? ' is-active' : ''}" data-side-tab="${t.id}" data-dtab="${t.id}" draggable="true" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="name">${esc(titleOf(t))}</span></button></li>`;
       }).join('')}</ul>`;
     }
     h += `</div>`;
@@ -267,7 +293,7 @@ function tabRow(t, counts) {
   const d = siteName(url);
   const urlHtml = d && u.startsWith(d) ? `<b>${esc(d)}</b>${esc(u.slice(d.length))}` : esc(u);
   const ago = timeAgo(t.lastAccessed);
-  return `<li class="tab${selected.has(t.id) ? ' is-selected' : ''}" data-id="${t.id}">
+  return `<li class="tab${selected.has(t.id) ? ' is-selected' : ''}" data-id="${t.id}" data-dtab="${t.id}" draggable="true">
     <input type="checkbox" id="sel-${t.id}" data-act="select" ${selected.has(t.id) ? 'checked' : ''} aria-label="Select ${esc(titleOf(t))}">
     ${fav(url)}
     <div class="tab-text"><div class="tab-title"><span class="t">${esc(titleOf(t))}</span>${AIUI.tabStatus(t)}${badges.join('')}</div><div class="tab-url">${urlHtml}</div>${AIUI.tabLine(t)}</div>
@@ -390,14 +416,14 @@ const sortMode = () => (dash.sort === 'urgent' && !AIUI.aiEnabled() ? 'manual' :
 /** A fingerprint of every tab's status: when it changes the cards re-sort and re-fold. */
 const statusSig = () => (AIUI.aiEnabled() ? `${AIUI.anyGroupRunning()}|` + allTabs(model).map(x => `${x.t.id}:${tabSt(x.t) || ''}`).join(',') : '');
 /** After AI paints new statuses in place, redraw the dashboard if the order changed. */
-function onAiPainted() { if (view.kind === 'dashboard' && !renaming && statusSig() !== dashSig) renderMain(); }
+function onAiPainted() { if (view.kind === 'dashboard' && !renaming && !drag && statusSig() !== dashSig) renderMain(); }
 
 function cardTab(t) {
   const url = t.url || t.pendingUrl || '';
   const sleeping = t.discarded || t.frozen;
   const site = siteName(url);
   const tip = `${titleOf(t)}\n${shortUrl(url)}${sleeping ? '\nSleeping: reloads when you open it' : ''}`;
-  return `<li class="card-tab${t.active ? ' is-active' : ''}${sleeping ? ' is-sleeping' : ''}" data-id="${t.id}">
+  return `<li class="card-tab${t.active ? ' is-active' : ''}${sleeping ? ' is-sleeping' : ''}" data-id="${t.id}" data-dtab="${t.id}" draggable="true">
     ${AIUI.tabStatus(t, { edge: true })}<button class="card-tab-btn" data-act="activate" type="button" title="${esc(tip)}">${fav(url)}<span class="card-tab-text"><span class="card-tab-line"><span class="t">${esc(titleOf(t))}</span>${site ? `<span class="dom">${esc(site)}</span>` : ''}</span>${AIUI.tabLine(t)}</span>
     ${t.audible ? `<span class="card-ico" title="Playing audio">${ICON.audio}</span>` : ''}${t.active ? '<span class="live" title="The visible tab in its window"></span>' : ''}</button>
     <span class="card-tab-acts">${AIUI.tabSumButton(t)}<button class="icon-btn" data-act="move" type="button" title="Move to group" aria-label="Move ${esc(titleOf(t))} to group">${ICON.move}</button><button class="icon-btn close" data-act="close" type="button" title="Close tab" aria-label="Close ${esc(titleOf(t))}">${ICON.close}</button></span></li>`;
@@ -432,7 +458,7 @@ function groupCard(g) {
   const done = AIUI.aiEnabled() ? g.tabs.filter(t => tabSt(t) === 'done').length : 0;
   const cls = ['card', s === 'action' && 'needs-you', s === 'done' && 'is-done'].filter(Boolean).join(' ');
   return `<article class="${cls}" data-card="${g.id}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
-    <header class="card-head">
+    <header class="card-head" draggable="true">
       <button class="card-name" data-act="open" type="button" title="${PANEL ? 'Open' : 'Show'} ${esc(g.name)} in ${PANEL ? 'the full dashboard' : 'detail'}">${esc(g.name)}</button>${AIUI.groupStatusBadge(g)}
       ${model.windowCount > 1 ? `<span class="win-tag">W${g.window}</span>` : ''}
       <span class="card-tools">
@@ -457,7 +483,7 @@ function inboxRow() {
     <button class="inbox-open" data-act="open" type="button" title="Show the Inbox">${ICON.inbox}<span>Inbox</span><span class="count">${n}</span></button>
     <ul class="inbox-tabs">${shown.map(t => {
       const url = t.url || t.pendingUrl || '';
-      return `<li class="inbox-tab" data-id="${t.id}"><button data-act="activate" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="t">${esc(titleOf(t))}</span></button></li>`;
+      return `<li class="inbox-tab" data-id="${t.id}" data-dtab="${t.id}" draggable="true"><button data-act="activate" type="button" title="${esc(titleOf(t))}\n${esc(shortUrl(url))}">${fav(url)}<span class="t">${esc(titleOf(t))}</span></button></li>`;
     }).join('')}</ul>
     ${n > shown.length ? `<button class="link inbox-more" data-act="open" type="button">+ ${n - shown.length} more</button>` : ''}
   </section>`;
@@ -760,10 +786,21 @@ document.addEventListener('keydown', e => {
     if (!$('#modal').hidden) return closeModal();
   }
   if (e.altKey && !mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    const dir = e.key === 'ArrowUp' ? -1 : 1;
     const gEl = e.target.closest?.('#nav [data-gid]');
-    const m = gEl && neighborMove(model.groups, +gEl.dataset.gid, e.key === 'ArrowUp' ? -1 : 1);
-    if (gEl) e.preventDefault();
-    if (m) doMoveGroup(+gEl.dataset.gid, m.targetId, m.place, true);
+    const tEl = !gEl && e.target.closest?.('.tabs [data-dtab]');
+    if (gEl) {
+      e.preventDefault();
+      const m = neighborMove(model.groups, +gEl.dataset.gid, dir);
+      if (m) doMoveGroup(+gEl.dataset.gid, m.targetId, m.place, { refocus: true });
+    } else if (tEl) {
+      // On a group or Inbox page, Alt+↑/↓ moves the focused tab one place in the tab strip.
+      e.preventDefault();
+      const id = +tEl.dataset.dtab;
+      const x = tabById(id);
+      const m = x && neighborMove(x.owner ? x.owner.tabs : model.inbox, id, dir);
+      if (m) doPlaceTabs([id], { groupId: ownerId(id), anchorId: m.targetId, place: m.place }, { refocus: id });
+    }
     return;
   }
   if (e.altKey && !mod && e.code === 'Digit0' && $('#pal').hidden) { e.preventDefault(); setView({ kind: 'dashboard' }); return; }
@@ -772,51 +809,110 @@ document.addEventListener('keydown', e => {
     if (g) { e.preventDefault(); setView({ kind: 'group', id: g.id }); }
   }
 });
-/* ---------- sidebar drag to reorder groups ---------- */
-const DRAG_TYPE = 'application/x-tabdesk-group';
-const navEl = $('#nav');
-function clearDropMarks() { navEl.querySelectorAll('.drop-before, .drop-after').forEach(n => n.classList.remove('drop-before', 'drop-after')); }
-function dropPlace(gEl, e) {
-  const r = gEl.querySelector('.nav-row').getBoundingClientRect();
-  return e.clientY < r.top + r.height / 2 ? 'before' : 'after';
+/* ---------- drag and drop: reorder tabs and groups ---------- */
+// Tabs drag from dashboard cards, the dashboard's Inbox row, the group and Inbox pages and the
+// sidebar's tab lists. Groups drag by a card's header or a sidebar row. Drops move the real tabs and
+// groups in Chrome's tab strip; every open Tab Desk page and the side panel then redraws from
+// Chrome's tab events, so they all stay in sync. Redraws wait until the drag ends.
+const DRAG_TYPE = 'application/x-tabdesk';
+const DROP_MARKS = ['drop-before', 'drop-after', 'drop-into', 'axis-x'];
+function clearDropMarks() { document.querySelectorAll('.drop-before, .drop-after, .drop-into').forEach(n => n.classList.remove(...DROP_MARKS)); }
+const halfOf = (el, e, axis) => {
+  const r = el.getBoundingClientRect();
+  return (axis === 'x' ? e.clientX < r.left + r.width / 2 : e.clientY < r.top + r.height / 2) ? 'before' : 'after';
+};
+/** Cards side by side in a grid reorder left/right; in one column, up/down. */
+const cardsAxis = () => { const c = $('.cards'); return c && getComputedStyle(c).gridTemplateColumns.split(' ').length > 1 ? 'x' : 'y'; };
+
+/** Where a drop at this point would go, or null when it would do nothing. */
+function dropTarget(e) {
+  const at = s => e.target.closest?.(s);
+  if (drag?.kind === 'group') {
+    const id = drag.id;
+    const card = at('.card[data-card]');
+    const side = !card && at('#nav [data-gid]');
+    if (!card && !side) return null;
+    const targetId = +(card ? card.dataset.card : side.dataset.gid);
+    const axis = card ? cardsAxis() : 'y';
+    const place = halfOf(card || side.querySelector('.nav-row'), e, axis);
+    if (!groupMoveTarget(model.groups, id, targetId, place)) return null;
+    return { el: card || side, place, axis, run: () => doMoveGroup(id, targetId, place, { fromDashboard: !!card }) };
+  }
+  if (drag?.kind !== 'tab') return null;
+  const ids = drag.ids;
+  const tEl = at('[data-dtab]');
+  if (tEl) {
+    const anchorId = +tEl.dataset.dtab;
+    const x = tabById(anchorId);
+    if (!x || ids.includes(anchorId)) return null;
+    const axis = tEl.classList.contains('inbox-tab') ? 'x' : 'y';
+    const place = halfOf(tEl, e, axis);
+    const groupId = x.owner ? x.owner.id : -1;
+    const t = ids.length === 1 && tabById(ids[0])?.t;
+    if (t && ownerId(t.id) === groupId && t.windowId === x.t.windowId && tabMoveIndex(t.index, x.t.index, place) === t.index) return null;
+    const reorder = !!tEl.closest('.card') && sortMode() === 'urgent';
+    return { el: tEl, place, axis, run: () => doPlaceTabs(ids, { groupId, anchorId, place }, { reorder }) };
+  }
+  const box = at('.inbox-row, .card[data-card], #nav [data-nav=inbox], #nav [data-gid]');
+  if (!box) return null;
+  const groupId = box.matches('.inbox-row, [data-nav=inbox]') ? -1 : +(box.dataset.card ?? box.dataset.gid);
+  if (ids.every(id => ownerId(id) === groupId)) return null;
+  return { el: box, place: 'into', run: () => doPlaceTabs(ids, { groupId }) };
 }
-navEl.addEventListener('dragstart', e => {
-  const row = e.target.closest?.('.nav-row');
-  if (!row) return;
-  const gEl = row.closest('[data-gid]');
-  dragging = +gEl.dataset.gid;
+
+function markDragging(on) {
+  const sel = !drag ? [] : drag.kind === 'group' ? [`[data-gid="${drag.id}"]`, `.card[data-card="${drag.id}"]`] : drag.ids.map(id => `[data-dtab="${id}"]`);
+  if (sel.length) document.querySelectorAll(sel.join(',')).forEach(n => n.classList.toggle('is-dragging', on));
+}
+
+document.addEventListener('dragstart', e => {
+  const tEl = e.target.closest?.('[data-dtab]');
+  const gEl = !tEl && e.target.closest?.('#nav .nav-row, .card-head');
+  if (!tEl && !gEl) return;
+  if (tEl) {
+    const id = +tEl.dataset.dtab;
+    // On a group or Inbox page, dragging a selected tab takes the whole selection along.
+    const ids = selected.size > 1 && selected.has(id) && tEl.closest('.tabs') ? allTabs(model).map(x => x.t.id).filter(t => selected.has(t)) : [id];
+    drag = { kind: 'tab', ids };
+  } else {
+    drag = { kind: 'group', id: +(gEl.closest('[data-gid]')?.dataset.gid ?? gEl.closest('[data-card]').dataset.card) };
+  }
+  const src = tEl || gEl;
+  closeMenu();
   e.dataTransfer.effectAllowed = 'move';
-  e.dataTransfer.setData(DRAG_TYPE, String(dragging));
-  e.dataTransfer.setDragImage(row, 16, row.offsetHeight / 2);
-  requestAnimationFrame(() => gEl.classList.add('is-dragging'));
+  e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(drag));
+  e.dataTransfer.setDragImage(src, 16, Math.min(src.offsetHeight / 2, 20));
+  requestAnimationFrame(() => markDragging(true));
 });
-navEl.addEventListener('dragover', e => {
-  if (dragging == null || !e.dataTransfer.types.includes(DRAG_TYPE)) return;
-  const gEl = e.target.closest?.('[data-gid]');
-  if (!gEl) return;
+function onDragOver(e) {
+  if (!drag || !e.dataTransfer.types.includes(DRAG_TYPE)) return;
   e.preventDefault();
-  const place = dropPlace(gEl, e);
-  const ok = !!groupMoveTarget(model.groups, dragging, +gEl.dataset.gid, place);
-  e.dataTransfer.dropEffect = ok ? 'move' : 'none';
+  const t = dropTarget(e);
+  e.dataTransfer.dropEffect = t ? 'move' : 'none';
+  if (t?.el.classList.contains(`drop-${t.place}`)) return;
   clearDropMarks();
-  if (ok) gEl.classList.add(`drop-${place}`);
+  if (t) t.el.classList.add(`drop-${t.place}`, ...(t.axis === 'x' ? ['axis-x'] : []));
+}
+document.addEventListener('dragenter', onDragOver);
+document.addEventListener('dragover', onDragOver);
+document.addEventListener('dragleave', e => {
+  // Only when the pointer leaves the page; moving between elements fires dragleave too.
+  if (drag && (e.clientX <= 0 || e.clientY <= 0 || e.clientX >= innerWidth || e.clientY >= innerHeight)) clearDropMarks();
 });
-navEl.addEventListener('dragleave', e => { if (!navEl.contains(e.relatedTarget)) clearDropMarks(); });
-navEl.addEventListener('drop', e => {
-  const gEl = e.target.closest?.('[data-gid]');
-  if (dragging == null || !gEl) return;
+document.addEventListener('drop', e => {
+  if (!drag) return;
   e.preventDefault();
-  const id = dragging;
-  const place = dropPlace(gEl, e);
+  const t = dropTarget(e);
   endDrag();
-  doMoveGroup(id, +gEl.dataset.gid, place);
+  t?.run();
 });
-navEl.addEventListener('dragend', endDrag);
+document.addEventListener('dragend', endDrag);
 function endDrag() {
-  if (dragging == null) return;
-  dragging = null;
+  if (!drag) return;
+  markDragging(false);
+  drag = null;
   clearDropMarks();
-  if (deferred) { deferred = false; refresh(); } else renderSide();
+  if (deferred) { deferred = false; refresh(); }
 }
 
 document.addEventListener('focusout', e => { if (e.target.id === 'renameInput') commitRename(); });

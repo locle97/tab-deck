@@ -1,7 +1,7 @@
 // Every change Tab Desk makes to real tabs goes through this file.
 // Actions that can be reversed return an async `undo` function.
 
-import { nextColor, sortedBySite, toWorkspace } from './model.js';
+import { nextColor, sortedBySite, tabMoveIndex, toWorkspace } from './model.js';
 import { addWorkspace, removeWorkspace } from './workspaces.js';
 
 const exists = p => p.then(() => true, () => false);
@@ -114,6 +114,69 @@ export async function moveTabs(tabIds, target, model) {
     }
   };
   return { undo, groupId };
+}
+
+const getTabs = ids => Promise.all(ids.map(id => chrome.tabs.get(id).catch(() => null))).then(ts => ts.filter(Boolean));
+
+/**
+ * Drag and drop: put tabs into a group (or the Inbox, groupId -1), optionally
+ * right before or after another tab. The tabs keep their order and end up
+ * next to each other. Membership is set first (chrome.tabs.group also brings
+ * tabs over from other windows), then each tab is moved to its exact place;
+ * Chrome keeps a moved tab's group when it lands on a group's edge.
+ * @param ids tab ids, in the order they should end up
+ * @param target {groupId, anchorId?, place?: 'before'|'after'}
+ * @returns an undo function
+ */
+export async function placeTabs(ids, { groupId, anchorId = null, place = 'after' }) {
+  const before = await getTabs(ids);
+  const live = before.map(t => t.id);
+  if (!live.length) return async () => {};
+  const anchor = anchorId != null ? await chrome.tabs.get(anchorId).catch(() => null) : null;
+
+  const fixMembership = async () => {
+    const now = await getTabs(live);
+    if (groupId !== -1) {
+      const out = now.filter(t => t.groupId !== groupId).map(t => t.id);
+      if (out.length) await chrome.tabs.group({ tabIds: out, groupId });
+    } else {
+      const away = anchor ? now.filter(t => t.windowId !== anchor.windowId).map(t => t.id) : [];
+      if (away.length) await chrome.tabs.move(away, { windowId: anchor.windowId, index: -1 }); // leaves its group too
+      const grouped = (await getTabs(live)).filter(t => t.groupId !== -1).map(t => t.id);
+      if (grouped.length) await chrome.tabs.ungroup(grouped);
+    }
+  };
+
+  await fixMembership();
+  if (anchor) {
+    let ref = anchor.id, where = place;
+    for (const id of live) {
+      const [t, a] = await Promise.all([chrome.tabs.get(id), chrome.tabs.get(ref)]);
+      if (t.windowId === a.windowId) {
+        const index = tabMoveIndex(t.index, a.index, where);
+        if (index !== t.index) await chrome.tabs.move(id, { index });
+      }
+      ref = id; where = 'after';
+    }
+    await fixMembership(); // in case Chrome regrouped a tab at a group's edge
+  }
+
+  return async () => {
+    const order = [...before].sort((a, b) => a.windowId - b.windowId || a.index - b.index);
+    for (const t of order) {
+      const cur = await chrome.tabs.get(t.id).catch(() => null);
+      if (!cur) continue;
+      if (cur.windowId !== t.windowId && await exists(chrome.windows.get(t.windowId))) {
+        await chrome.tabs.move(t.id, { windowId: t.windowId, index: t.index });
+      }
+      const now = await chrome.tabs.get(t.id);
+      if (t.groupId === -1) { if (now.groupId !== -1) await chrome.tabs.ungroup([t.id]); }
+      else if (now.groupId !== t.groupId && await exists(chrome.tabGroups.get(t.groupId))) {
+        await chrome.tabs.group({ tabIds: [t.id], groupId: t.groupId });
+      }
+      await chrome.tabs.move(t.id, { index: t.index }).catch(() => {});
+    }
+  };
 }
 
 export async function renameGroup(group, title) {
