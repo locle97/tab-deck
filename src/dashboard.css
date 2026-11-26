@@ -584,3 +584,20 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-label-row { display: flex; align-items: center; gap: 2px; }
 .ai-label-row .ai-check { margin: 6px 0; }
 .ai-label-row .ai-info { vertical-align: 0; }
+
+/* Side panel (panel.html): the dashboard alone, one column, with a two-row header. */
+body.panel .app { grid-template-columns: minmax(0, 1fr); }
+body.panel .side { display: none; }
+body.panel .main { padding-inline: 10px; }
+body.panel .pane { padding: 0 0 24px; }
+.panel-bar { flex-direction: column; align-items: stretch; gap: 4px; padding: 8px 0 6px; margin-bottom: 10px; }
+.panel-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.panel-top .brand-mark { width: 18px; height: 18px; flex: none; }
+.panel-count { flex: 1; min-width: 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-top .btn.sm { height: 30px; flex: none; }
+.panel-bar .dash-tools { width: 100%; flex-wrap: nowrap; gap: 2px; }
+.panel-bar .dash-tools .grow { flex: 1; }
+.panel-bar .icon-btn { width: 30px; height: 30px; }
+.panel-bar .icon-btn svg { width: 16px; height: 16px; }
+body.panel .cards { gap: 10px; }
+body.panel .inbox-row { margin-top: 10px; }

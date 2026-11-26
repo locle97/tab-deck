@@ -289,6 +289,26 @@ try {
   assert.equal(await page.locator('.chip, .done-row').count(), 0, 'no status filter or Done row');
   step('dashboard cards show tab summaries, status edges, the group sentence; and the sort menu works');
 
+  // The side panel shows the same statuses, read from storage, and picks up changes made in the page.
+  const panel = await ctx.newPage();
+  await panel.setViewportSize({ width: 380, height: 700 });
+  panel.on('pageerror', e => errors.push(`panel: ${e.message}`));
+  await panel.goto(`chrome-extension://${extId}/panel.html`);
+  await panel.waitForSelector('.card:has-text("Research") .ai-gtext');
+  assert.match(await panel.textContent('.card:has-text("Research") .card-head'), /Needs you/);
+  assert.equal(await panel.locator('.card-tab:has-text("/pr/5") .ai-edge.st-action').count(), 1);
+  assert.deepEqual((await panel.$$eval('.card .card-name', ns => ns.map(n => n.textContent.trim()))).slice(0, 2), ['Research', 'Other']);
+  if (SHOTS) await panel.screenshot({ path: join(SHOTS, 'ai-side-panel.png') });
+  await page.bringToFront();
+  await page.click('.card-tab:has-text("/pr/5") .ai-edge');
+  await page.click('.menu button:has-text("Done")');
+  await panel.waitForSelector('.card-tab:has-text("/pr/5") .ai-edge.st-done');
+  await page.click('.card-tab:has-text("/pr/5") .ai-edge');
+  await page.click('.menu button:has-text("Let the AI decide")');
+  await panel.waitForSelector('.card-tab:has-text("/pr/5") .ai-edge.st-action');
+  await panel.close();
+  step('side panel shows the same statuses and updates when they change in the page');
+
   // Gemini key, consent, and cloud summaries.
   await page.click('#settingsBtn');
   // Remembers the last tab (Summary instructions); arrow keys move between tabs.

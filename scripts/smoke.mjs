@@ -253,6 +253,41 @@ try {
   await page.setViewportSize({ width: 1280, height: 820 });
   step('dashboard shows 3, 2 or 1 columns depending on width');
 
+  // Side panel: the toolbar icon opens it; it shows the dashboard alone and opens the full page.
+  assert.deepEqual(await sw.evaluate(() => chrome.sidePanel.getPanelBehavior()), { openPanelOnActionClick: true });
+  assert.equal((await sw.evaluate(() => chrome.runtime.getManifest())).side_panel.default_path, 'panel.html');
+  const panel = await ctx.newPage();
+  panel.on('pageerror', e => errors.push(`panel: ${e.message}`));
+  panel.on('console', m => { if (m.type() === 'error') errors.push(`panel: ${m.text()}`); });
+  await panel.setViewportSize({ width: 380, height: 760 });
+  await panel.goto(`chrome-extension://${extId}/panel.html`);
+  await panel.waitForSelector('.card[data-card]');
+  assert.equal(await panel.isVisible('.side'), false, 'the panel has no group sidebar');
+  assert.equal(await panel.isVisible('[data-act=view]'), false, 'no grid/list toggle in the panel');
+  assert.equal(await panel.evaluate(() => getComputedStyle(document.querySelector('.cards')).gridTemplateColumns.split(' ').length), 1);
+  assert.equal(await panel.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'no sideways scroll');
+  assert.equal(await panel.$$eval('.card', c => c.length), await page.$$eval('.card', c => c.length));
+  if (SHOTS) await panel.screenshot({ path: join(SHOTS, 'side-panel.png') });
+  step('side panel shows the groups as one column of cards');
+
+  // "Full dashboard" focuses the existing Tab Desk tab; a group name opens that group there.
+  const dashTabs = () => sw.evaluate(async url => (await chrome.tabs.query({})).filter(t => t.url.startsWith(url)).length, `chrome-extension://${extId}/dashboard.html`);
+  await panel.click('[data-act=open-full]');
+  assert.equal(await dashTabs(), 1, 'reuses the open Tab Desk tab');
+  const gName = await panel.textContent('.card-name >> nth=0');
+  await panel.click('.card-name >> nth=0');
+  await page.waitForFunction(n => document.querySelector('.pane-head h1')?.textContent === n, gName);
+  assert.equal(await panel.isVisible('.card[data-card]'), true, 'the panel stays on its dashboard');
+  step('side panel opens the full dashboard, on a group when you click its name');
+
+  // With no Tab Desk tab open, the button opens one.
+  await page.close();
+  await panel.click('[data-act=open-full]');
+  let opened = 0;
+  for (let k = 0; k < 30 && !opened; k++) { opened = await dashTabs(); if (!opened) await panel.waitForTimeout(100); }
+  assert.equal(opened, 1, 'opens a new Tab Desk tab');
+  step('side panel opens a new full dashboard tab when none is open');
+
   assert.deepEqual(errors, []);
   step('no page errors');
   console.log('\nSmoke test passed.');

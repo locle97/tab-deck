@@ -6,6 +6,7 @@ import {
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
   effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, needsInsight, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
   pickInstructions, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
+  mergeRemote,
 } from '../src/lib/ai-core.js';
 
 test('normalizeSettings fills defaults and drops bad values', () => {
@@ -274,4 +275,20 @@ test('draft prompt asks to fill the template from an example page; drafts are cl
   assert.match(draftPrompt({ pattern: 'x.com' }).user, /No page text/);
   assert.equal(cleanDraft('Sure! Here it is:\n```\nThis page is: a PR.\nFacts: merged or not.\n```'), 'This page is: a PR.\nFacts: merged or not.');
   assert.ok(cleanDraft('x'.repeat(5000)).length <= MAX_INSTRUCTIONS);
+});
+
+test('mergeRemote: take the other page’s summaries, keep our unsaved ones, forget keys storage has', () => {
+  const local = { a: { s: 'mine' }, b: { s: 'old' }, d: { s: 'same' } };
+  const dirty = new Set(['a', 'd', 'gone']);
+  const remote = { b: { s: 'theirs' }, c: { s: 'new' }, d: { s: 'same' }, gone: { s: 'x' } };
+  const { merged, resave } = mergeRemote(remote, local, dirty);
+  assert.deepEqual(merged, { a: { s: 'mine' }, b: { s: 'theirs' }, c: { s: 'new' }, d: { s: 'same' } });
+  assert.equal(resave, true);
+  assert.deepEqual([...dirty].sort(), ['a', 'gone']);
+  // Our own write comes back: nothing left to merge.
+  const again = mergeRemote(merged, merged, dirty);
+  assert.equal(again.resave, false);
+  assert.equal(dirty.size, 0);
+  // Storage cleared elsewhere, nothing pending here.
+  assert.deepEqual(mergeRemote(undefined, local, new Set()), { merged: {}, resave: false });
 });

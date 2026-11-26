@@ -12,14 +12,18 @@ const SELF_URL = chrome.runtime.getURL('dashboard.html');
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
 const MOD = isMac ? '⌘' : 'Ctrl';
 const PAL_PLACEHOLDER = 'Search tabs, groups, workspaces. Type > for commands';
+// The side panel loads this same code from panel.html. It only shows the dashboard, in a compact
+// form; anything else (a group's details, the Inbox, workspaces) opens in the full page.
+const PANEL = document.body.classList.contains('panel');
 
-let selfTab = null;
+let selfWindowId = null; // the window this page or panel is in
 let model = { groups: [], inbox: [], windowCount: 1, tabCount: 0 };
 let workspaces = [];
 let view = { kind: 'dashboard' };
 let selected = new Set();
 let renaming = false;
 let deferred = false;
+let fullPageOpen = false;
 let dragging = null; // id of the group being dragged in the sidebar
 const showAllTabs = new Set(); // dashboard cards opened up to list every tab
 
@@ -38,13 +42,16 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const cvar = c => `var(--g-${c})`;
 const groupById = id => model.groups.find(g => g.id === id);
 const tabById = id => allTabs(model).find(x => x.t.id === id);
+const PANEL_URL = chrome.runtime.getURL('panel.html');
 const isSelf = t => (t.url || t.pendingUrl || '').startsWith(SELF_URL);
+const isOurs = t => isSelf(t) || (t.url || t.pendingUrl || '').startsWith(PANEL_URL); // left out of the dashboard
 const titleOf = t => t.title || shortUrl(t.url || t.pendingUrl) || 'New tab';
 
 /* ---------- data ---------- */
 async function refresh() {
   const [tabs, groups] = await Promise.all([chrome.tabs.query({}), chrome.tabGroups.query({})]);
-  model = buildModel(tabs, groups, isSelf);
+  model = buildModel(tabs, groups, isOurs);
+  fullPageOpen = tabs.some(isSelf);
   const live = new Set(allTabs(model).map(x => x.t.id));
   for (const id of selected) if (!live.has(id)) selected.delete(id);
   if (view.kind === 'group' && !groupById(view.id)) {
@@ -53,7 +60,8 @@ async function refresh() {
   if (renaming || dragging != null) { deferred = true; return; }
   render();
   if (!$('#pal').hidden) renderPalette();
-  AIUI.noticeTabs(allTabs(model));
+  // Automatic summaries run in the full page when it is open, so the panel doesn't do the same work twice.
+  if (!PANEL || !fullPageOpen) AIUI.noticeTabs(allTabs(model));
 }
 let refreshTimer;
 const scheduleRefresh = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 80); };
@@ -63,7 +71,11 @@ chrome.tabs.onUpdated.addListener((id, info) => { if (RELEVANT.some(k => k in in
 ['onCreated', 'onRemoved', 'onMoved', 'onAttached', 'onDetached', 'onActivated', 'onReplaced'].forEach(e => chrome.tabs[e].addListener(scheduleRefresh));
 ['onCreated', 'onUpdated', 'onRemoved', 'onMoved'].forEach(e => chrome.tabGroups[e].addListener(scheduleRefresh));
 onWorkspacesChanged(list => { workspaces = list; render(); if (!$('#pal').hidden) renderPalette(); });
-chrome.runtime.onMessage.addListener(msg => { if (msg?.type === 'open-palette') openPalette(); });
+chrome.runtime.onMessage.addListener(msg => {
+  if (PANEL) return; // these are for the full page
+  if (msg?.type === 'open-palette') openPalette();
+  if (msg?.type === 'show-view') { const v = viewFromHash(msg.view); if (v) setView(v); }
+});
 
 /* ---------- toast + running actions ---------- */
 let toastTimer = null;
@@ -99,7 +111,29 @@ async function perform(fn) {
 }
 
 /* ---------- actions wired to UI ---------- */
-function setView(v) { view = v; selected.clear(); renaming = false; closeMenu(); render(); $('#main').scrollTop = 0; }
+function setView(v) {
+  if (PANEL && v.kind !== 'dashboard') { closeMenu(); openFullPage(v); return; }
+  view = v; selected.clear(); renaming = false; closeMenu(); render(); $('#main').scrollTop = 0;
+}
+
+/* ---------- full page <-> side panel ---------- */
+/** A view as a URL hash for the full page ("group=12", "inbox", "workspaces"), and back. */
+function viewHash(v) { return v?.kind === 'group' ? `group=${v.id}` : v && v.kind !== 'dashboard' ? v.kind : ''; }
+function viewFromHash(h = '') {
+  const m = /^group=(\d+)$/.exec(h);
+  if (m) return groupById(+m[1]) ? { kind: 'group', id: +m[1] } : null;
+  return ['inbox', 'workspaces', 'dashboard'].includes(h) ? { kind: h } : null;
+}
+/** From the side panel: open or focus the full Tab Desk page, optionally on a view. */
+function openFullPage(v = null) {
+  chrome.runtime.sendMessage({ type: 'open-dashboard', view: viewHash(v), windowId: selfWindowId })
+    .catch(e => toast(`Couldn't open the full dashboard: ${esc(e.message || e)}`));
+}
+/** From the full page: open the side panel in this window. Needs the click's user gesture. */
+const canOpenPanel = () => !PANEL && !!chrome.sidePanel?.open;
+function openSidePanel() {
+  chrome.sidePanel.open({ windowId: selfWindowId }).catch(e => toast(`Couldn't open the side panel: ${esc(e.message || e)}`));
+}
 
 const doCloseTabs = ids => perform(async () => ({ msg: `Closed ${plural(ids.length, 'tab')}`, undo: await A.closeTabs(ids) }));
 
@@ -117,7 +151,7 @@ const doSaveClose = g => perform(async () => {
 });
 
 const doRestore = ws => perform(async () => {
-  const { groupId, count, undo } = await A.restoreWorkspace(ws, selfTab.windowId);
+  const { groupId, count, undo } = await A.restoreWorkspace(ws, selfWindowId);
   view = { kind: 'group', id: groupId };
   return { msg: `Restored “${esc(ws.name)}” with ${plural(count, 'tab')}`, undo };
 });
@@ -171,6 +205,9 @@ const ICON = {
   rows: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6.5" rx="1.5"/><rect x="3" y="13.5" width="18" height="6.5" rx="1.5"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
+  expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg>',
+  panel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>',
   go: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>',
 };
 
@@ -259,6 +296,7 @@ function urlCounts() {
 }
 
 function renderMain() {
+  if (PANEL && view.kind !== 'dashboard') view = { kind: 'dashboard' }; // e.g. after a restore or a move
   const counts = urlCounts();
   if (view.kind === 'dashboard') { $('#main').innerHTML = renderDashboard(); return; }
   let h = '<div class="pane">';
@@ -367,7 +405,7 @@ function cardTab(t) {
 
 function cardTabList(key, tabs) {
   const all = showAllTabs.has(key);
-  const limit = CARD_TABS[dash.view];
+  const limit = CARD_TABS[PANEL ? 'grid' : dash.view];
   const ordered = sortMode() === 'urgent' ? sortTabsBy(tabs, t => statusRank(tabSt(t))) : tabs;
   const { shown, hidden } = cardTabs(ordered, limit, all);
   let h = `<ul class="card-tabs">${shown.map(cardTab).join('')}</ul>`;
@@ -395,7 +433,7 @@ function groupCard(g) {
   const cls = ['card', s === 'action' && 'needs-you', s === 'done' && 'is-done'].filter(Boolean).join(' ');
   return `<article class="${cls}" data-card="${g.id}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
     <header class="card-head">
-      <button class="card-name" data-act="open" type="button" title="Show ${esc(g.name)} in detail">${esc(g.name)}</button>${AIUI.groupStatusBadge(g)}
+      <button class="card-name" data-act="open" type="button" title="${PANEL ? 'Open' : 'Show'} ${esc(g.name)} in ${PANEL ? 'the full dashboard' : 'detail'}">${esc(g.name)}</button>${AIUI.groupStatusBadge(g)}
       ${model.windowCount > 1 ? `<span class="win-tag">W${g.window}</span>` : ''}
       <span class="card-tools">
         <button class="btn sm" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch</button>
@@ -426,6 +464,7 @@ function inboxRow() {
 }
 
 function dashBar() {
+  if (PANEL) return panelBar();
   const ai = AIUI.aiEnabled();
   const total = model.groups.length;
   const left = `<span class="dash-count">${plural(total, 'group')} · ${plural(model.tabCount, 'tab')}${model.windowCount > 1 ? ` · ${plural(model.windowCount, 'window')}` : ''}</span>`;
@@ -441,6 +480,29 @@ function dashBar() {
       </span>
       ${ai && total ? `<button class="btn sm" data-act="sum-all" type="button" ${running ? 'disabled' : ''} title="Summarize every group and its tabs">${AIUI.sparkIcon()}<span>Summarize all</span></button>` : ''}
       <button class="btn sm dash-search" data-act="search" type="button" title="Jump to a tab or group">${ICON.search}<span>Search</span><kbd>${MOD} K</kbd></button>
+      ${canOpenPanel() ? `<button class="icon-btn" data-act="open-panel" type="button" title="Open the side panel, to watch your groups while you work in a tab" aria-label="Open the side panel">${ICON.panel}</button>` : ''}
+    </div>
+  </div>`;
+}
+
+/** The side panel's header: name, counts and the way to the full page; then sort and a few icon tools. */
+function panelBar() {
+  const ai = AIUI.aiEnabled();
+  const total = model.groups.length;
+  const running = AIUI.anyGroupRunning();
+  return `<div class="dash-bar panel-bar">
+    <h1 class="sr-only">Tab Desk side panel</h1>
+    <div class="panel-top">
+      <span class="brand-mark" aria-hidden="true"><i style="background:var(--g-blue)"></i><i style="background:var(--g-purple)"></i><i style="background:var(--g-green)"></i><i style="background:var(--g-orange)"></i></span>
+      <span class="panel-count">${plural(total, 'group')} · ${plural(model.tabCount, 'tab')}</span>
+      <button class="btn sm primary" data-act="open-full" type="button" title="Open the full Tab Desk page in a tab">${ICON.expand}<span>Full dashboard</span></button>
+    </div>
+    <div class="dash-tools">
+      <button class="btn sm ghost" data-act="sort" type="button" aria-haspopup="menu" title="Sort groups">${ICON.sort}<span>${SORTS[sortMode()]}</span></button>
+      <span class="grow"></span>
+      ${ai && total ? `<button class="icon-btn" data-act="sum-all" type="button" ${running ? 'disabled' : ''} title="Summarize every group and its tabs" aria-label="Summarize all">${AIUI.sparkIcon()}</button>` : ''}
+      <button class="icon-btn" data-act="search" type="button" title="Jump to a tab or group (${MOD} K)" aria-label="Search">${ICON.search}</button>
+      <button class="icon-btn" data-act="settings" type="button" title="Settings: AI summaries and summary instructions" aria-label="Settings">${ICON.gear}</button>
     </div>
   </div>`;
 }
@@ -448,14 +510,14 @@ function dashBar() {
 function renderDashboard() {
   dashSig = statusSig();
   const sorted = sortGroups(model.groups, sortMode(), g => statusRank(groupSt(g)));
-  let h = `<div class="pane wide dash${dash.view === 'list' ? ' is-list' : ''}">${dashBar()}`;
+  let h = `<div class="pane wide dash${dash.view === 'list' && !PANEL ? ' is-list' : ''}">${dashBar()}`;
   if (!model.groups.length && !model.inbox.length) h += `<div class="empty"><strong>No open tabs</strong>Open some tabs and group them to see them here.</div>`;
   else {
     if (!model.groups.length) h += `<div class="notice">No tab groups yet. Select tabs in the Inbox and move them to a new group.</div>`;
     else h += `<div class="cards">${sorted.map(groupCard).join('')}</div>`;
     if (model.inbox.length) h += inboxRow();
   }
-  h += `<div class="hint-row"><span>Click a tab to switch to it</span><span>Click a group name for details</span><span><kbd>Alt 0</kbd> dashboard</span></div>`;
+  if (!PANEL) h += `<div class="hint-row"><span>Click a tab to switch to it</span><span>Click a group name for details</span><span><kbd>Alt 0</kbd> dashboard</span></div>`;
   return h + '</div>';
 }
 
@@ -664,6 +726,9 @@ function handleAction(act, row, e) {
     case 'view': dash.view = act.dataset.v; saveDash(); return renderMain();
     case 'sum-all': return AIUI.summarizeAll(model.groups.map(x => x.id));
     case 'search': return openPalette();
+    case 'open-full': return openFullPage();
+    case 'open-panel': return openSidePanel();
+    case 'settings': return AIUI.openAiSettings();
     case 'card-all': {
       const key = card.dataset.card === 'inbox' ? 'inbox' : +card.dataset.card;
       showAllTabs.has(key) ? showAllTabs.delete(key) : showAllTabs.add(key);
@@ -936,18 +1001,17 @@ $('#pal').addEventListener('click', e => { if (e.target.id === 'pal') closePalet
 /* ---------- start ---------- */
 async function start() {
   $('#kbdHint').textContent = `${MOD} K`;
-  selfTab = await chrome.tabs.getCurrent();
+  selfWindowId = (await chrome.tabs.getCurrent())?.windowId ?? (await chrome.windows.getCurrent()).id;
   workspaces = await listWorkspaces();
   await AIUI.initAi({ esc, toast, openModal, closeModal, render: () => render(), renderMain: () => renderMain(), tabById, groupById, openMenu, menuItem, menuLabel, allTabs: () => allTabs(model), onPainted: onAiPainted })
     .catch(e => console.error('AI summaries failed to start', e));
   await refresh();
-  // Tab Desk always opens on the dashboard.
+  // Tab Desk always opens on the dashboard, unless the side panel asked for a view (#group=12, #inbox).
   try { localStorage.removeItem('tabdesk.home'); } catch {}
-  setView({ kind: 'dashboard' });
-  if (location.hash === '#palette') {
-    history.replaceState(null, '', location.pathname);
-    openPalette();
-  }
+  const hash = location.hash.slice(1);
+  if (hash) history.replaceState(null, '', location.pathname);
+  setView((!PANEL && viewFromHash(hash)) || { kind: 'dashboard' });
+  if (hash === 'palette') openPalette();
 }
 start();
 
