@@ -601,3 +601,21 @@ body.panel .pane { padding: 0 0 24px; }
 .panel-bar .icon-btn svg { width: 16px; height: 16px; }
 body.panel .cards { gap: 10px; }
 body.panel .inbox-row { margin-top: 10px; }
+
+/* Drag and drop: tabs and groups. A line shows where the drop lands; a ring shows a group (or the Inbox) it joins. */
+.card-head[draggable="true"] { cursor: grab; }
+[data-dtab] { position: relative; }
+.is-dragging { opacity: .4; }
+[data-dtab].drop-before::after, [data-dtab].drop-after::after { content: ""; position: absolute; z-index: 3; left: 4px; right: 4px; height: 2px; border-radius: 1px; background: var(--focus); pointer-events: none; }
+[data-dtab].drop-before::after { top: -1px; }
+[data-dtab].drop-after::after { bottom: -1px; }
+[data-dtab].axis-x.drop-before::after, [data-dtab].axis-x.drop-after::after { top: 3px; bottom: 3px; width: 2px; height: auto; }
+[data-dtab].axis-x.drop-before::after { left: -3px; right: auto; }
+[data-dtab].axis-x.drop-after::after { left: auto; right: -3px; }
+.card.drop-before { box-shadow: 0 -6px 0 -3px var(--focus); }
+.card.drop-after { box-shadow: 0 6px 0 -3px var(--focus); }
+.card.axis-x.drop-before { box-shadow: -8px 0 0 -5px var(--focus); }
+.card.axis-x.drop-after { box-shadow: 8px 0 0 -5px var(--focus); }
+.card.drop-into, .inbox-row.drop-into { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+.inbox-row.drop-into { border-style: solid; }
+.nav-group.drop-into > .nav-row, .nav-item.drop-into { border-radius: 7px; background: color-mix(in srgb, var(--focus) 14%, transparent); box-shadow: inset 0 0 0 1px var(--focus); }

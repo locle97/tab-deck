@@ -216,6 +216,16 @@ export function groupMoveTarget(groups, groupId, targetId, place) {
   return { windowId: dst.windowId, index };
 }
 
+/**
+ * Where to send a tab with chrome.tabs.move so it lands right before or after
+ * `anchorIndex` in the same window. The tab leaves the strip first, so when it
+ * starts left of the anchor everything after it shifts left by one.
+ */
+export function tabMoveIndex(fromIndex, anchorIndex, place) {
+  const shift = fromIndex < anchorIndex ? 1 : 0;
+  return (place === 'after' ? anchorIndex + 1 : anchorIndex) - shift;
+}
+
 /** The group next to `groupId` in sidebar order, for keyboard reordering. */
 export function neighborMove(groups, groupId, dir) {
   const i = groups.findIndex(g => g.id === groupId);

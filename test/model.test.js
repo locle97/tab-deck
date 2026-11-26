@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildModel, findDuplicates, duplicateCount, domainProposals, sortedBySite,
   score, timeAgo, nextColor, shortUrl, siteName, toWorkspace, UNTITLED,
-  groupMoveTarget, neighborMove, cardTabs, groupFacts, lastUsed,
+  groupMoveTarget, neighborMove, cardTabs, groupFacts, lastUsed, tabMoveIndex,
 } from '../src/lib/model.js';
 
 const tab = (id, url, o = {}) => ({ id, url, title: `Tab ${id}`, windowId: 1, index: id, groupId: -1, active: false, ...o });
@@ -197,4 +197,16 @@ test('statusSegments', () => {
   const tabs = [{ s: 'done' }, { s: null }, { s: 'action' }, { s: 'done' }];
   assert.deepEqual(statusSegments(tabs, t => t.s, ['action', 'working', 'waiting', 'done', 'info']),
     [{ status: 'action', n: 1 }, { status: 'done', n: 2 }, { status: 'none', n: 1 }]);
+});
+
+test('tabMoveIndex: final index for a tab dropped before or after another tab', () => {
+  // strip: 0 1 2 3 4 — move tab at 1 before the tab at 3 → lands at 2
+  assert.equal(tabMoveIndex(1, 3, 'before'), 2);
+  assert.equal(tabMoveIndex(1, 3, 'after'), 3);
+  // moving left: nothing shifts
+  assert.equal(tabMoveIndex(4, 1, 'before'), 1);
+  assert.equal(tabMoveIndex(4, 1, 'after'), 2);
+  // already in place
+  assert.equal(tabMoveIndex(2, 3, 'before'), 2);
+  assert.equal(tabMoveIndex(3, 2, 'after'), 3);
 });
