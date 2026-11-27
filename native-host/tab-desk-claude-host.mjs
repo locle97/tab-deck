@@ -9,7 +9,8 @@
 // Requests:  { id, type: 'ping' }
 //            { id, type: 'prompt', model, system, user }
 // Responses: { id, ok: true, version, claude: { path, version } }        (ping)
-//            { id, ok: true, text, model }                                 (prompt)
+//            { id, ok: true, text, model, usage }                          (prompt)
+//              usage: { input, output, cacheRead, cacheWrite, costUsd, ms } as Claude Code reports them
 //            { id, ok: false, code, message }   code: no-cli | auth | model | rate | timeout | bad-request | other
 //
 // No dependencies beyond Node.js 18+.
@@ -112,9 +113,10 @@ export function classify(text, status) {
   return { code: 'other', message: line ? `Claude Code: ${line}` : 'Claude Code failed without saying why.' };
 }
 
-/** The `claude -p` arguments for one prompt. No tools, no MCP servers, no saved session: just an answer. */
+/** The `claude -p` arguments for one prompt. No tools, no MCP servers, no saved session, low effort: just an answer. */
 export function claudeArgs({ model, systemFile }) {
-  return ['-p', '--model', model, '--output-format', 'json', '--tools', '', '--strict-mcp-config', '--no-session-persistence',
+  // --effort low: less thinking, so faster and cheaper; plenty for one sentence. (Thinking can't be turned off from the CLI.)
+  return ['-p', '--model', model, '--effort', 'low', '--output-format', 'json', '--tools', '', '--strict-mcp-config', '--no-session-persistence',
     '--system-prompt-file', systemFile];
 }
 
@@ -161,10 +163,25 @@ async function prompt(msg) {
     const text = String(j.result ?? '');
     if (!text.trim()) return { ok: false, code: 'other', message: 'Claude Code returned an empty answer.' };
     const used = Object.keys(j.modelUsage || {})[0];
-    return { ok: true, text: text.slice(0, MAX_REPLY / 2), model: used || model };
+    return { ok: true, text: text.slice(0, MAX_REPLY / 2), model: used || model, usage: usageOf(j) };
   } finally {
     try { rmSync(systemFile, { force: true }); } catch {}
   }
+}
+
+/**
+ * Tokens, cost and time from `claude -p --output-format json`. costUsd is Claude Code's own figure: what
+ * the call would cost at API prices. On a Claude plan you aren't billed per call; it counts toward limits.
+ */
+export function usageOf(j) {
+  const u = j?.usage || {};
+  const n = v => (Number.isFinite(+v) && +v > 0 ? Math.round(+v) : 0);
+  return {
+    input: n(u.input_tokens), output: n(u.output_tokens),
+    cacheRead: n(u.cache_read_input_tokens), cacheWrite: n(u.cache_creation_input_tokens),
+    costUsd: Number.isFinite(+j?.total_cost_usd) ? Math.max(0, +j.total_cost_usd) : 0,
+    ms: n(j?.duration_ms),
+  };
 }
 
 export async function handle(msg) {

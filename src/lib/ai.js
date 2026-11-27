@@ -12,7 +12,7 @@ import {
   insightKey, groupKey, normalizeStatus, migrateInsightStatuses, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION, contentSig,
   sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES, previousBlock, tabUserText,
   CLOUDS, cloudModel, cloudConsent, consentKey, claudeRequest, claudeHeaders, parseClaudeSse, claudeError,
-  cloudReady, CLAUDE_CODE_HOST, claudeCodeRequest, claudeCodeError,
+  cloudReady, CLAUDE_CODE_HOST, claudeCodeRequest, claudeCodeError, addUsage,
 } from './ai-core.js';
 import { fieldPlanFor, decideStatus, foundAny, factsLine, fieldsBlock } from './fields.js';
 
@@ -407,17 +407,24 @@ const LOG_TEXT_MAX = 30000;
 let logChain = Promise.resolve();
 const clipLog = t => (typeof t === 'string' && t.length > LOG_TEXT_MAX ? `${t.slice(0, LOG_TEXT_MAX)}\n…[${t.length - LOG_TEXT_MAX} more characters not logged]` : t);
 
-/** Runs one model call and logs what was sent and what came back. entry: { kind, engine, api?, model?, title?, url?, group?, system, user } */
+/**
+ * Runs one model call, logs what was sent and what came back, and adds it to the usage tally.
+ * entry: { kind, engine, api?, model?, title?, url?, group?, system, user }. run(meter): a cloud call
+ * fills meter with the tokens (and Claude Code's cost estimate) its provider reported.
+ */
 async function logged(entry, run) {
   const t0 = Date.now();
-  let output, error;
+  const meter = {};
+  let output, error, stopped = false;
   try {
-    output = await run();
+    output = await run(meter);
     return output;
   } catch (e) {
-    error = e?.name === 'AbortError' ? 'Stopped' : (e?.message || String(e));
+    stopped = e?.name === 'AbortError';
+    error = stopped ? 'Stopped' : (e?.message || String(e));
     throw e;
   } finally {
+    if (!stopped) countUsage({ provider: entry.engine === 'cloud' ? entry.cloud : 'local', ok: !error, ...meter, ms: Date.now() - t0 });
     const rec = {
       at: new Date(t0).toISOString(), ms: Date.now() - t0, ...entry,
       system: clipLog(entry.system || ''), user: clipLog(entry.user || ''),
@@ -431,6 +438,25 @@ async function logged(entry, run) {
       await chrome.storage.local.set({ [LOG_KEY]: list.slice(-LOG_MAX) });
     }).catch(() => {});
   }
+}
+
+/* ---------- usage tally (Settings › Usage) ---------- */
+const USAGE_KEY = 'aiUsage';
+let usageChain = Promise.resolve();
+function countUsage(rec) {
+  usageChain = usageChain.then(async () => {
+    const { [USAGE_KEY]: cur } = await chrome.storage.local.get(USAGE_KEY);
+    await chrome.storage.local.set({ [USAGE_KEY]: addUsage(cur, rec) });
+  }).catch(() => {});
+}
+/** The usage tally: { [YYYY-MM-DD]: { [provider]: { calls, errors, input, output, cacheRead, cacheWrite, costUsd, ms } } }. */
+export async function usageStore() {
+  await usageChain;
+  return (await chrome.storage.local.get(USAGE_KEY))[USAGE_KEY] || {};
+}
+export async function clearUsage() {
+  await usageChain;
+  await chrome.storage.local.remove(USAGE_KEY);
 }
 
 /** The logged prompts, oldest first. */
@@ -489,7 +515,7 @@ async function localGroupSentence(name, lines, instructions, { api, signal, onPr
 
 /* ---------- cloud engine ---------- */
 
-async function streamGemini({ key, model, system, user, signal, onChunk, json = false }, retried = false) {
+async function streamGemini({ key, model, system, user, signal, onChunk, json = false, meter }, retried = false) {
   const { url, body } = geminiRequest({ model, system, user, json });
   let res;
   try {
@@ -507,7 +533,7 @@ async function streamGemini({ key, model, system, user, signal, onChunk, json = 
     const err = geminiError(res.status, await res.text().catch(() => ''));
     if (err.code === 'rate' && !retried && err.retry > 0 && err.retry <= 10) {
       await new Promise(r => setTimeout(r, err.retry * 1000));
-      return streamGemini({ key, model, system, user, signal, onChunk, json }, true);
+      return streamGemini({ key, model, system, user, signal, onChunk, json, meter }, true);
     }
     throw new AiError(err.message, err.code);
   }
@@ -520,14 +546,15 @@ async function streamGemini({ key, model, system, user, signal, onChunk, json = 
     const r = parseSse(buf + dec.decode(value, { stream: true }));
     buf = r.rest;
     blocked ||= r.blocked;
+    if (r.usage && meter) Object.assign(meter, r.usage);
     if (r.texts.length) { acc += r.texts.join(''); onChunk?.(acc); }
   }
-  if (buf) { const r = parseSse(buf + '\n'); blocked ||= r.blocked; if (r.texts.length) { acc += r.texts.join(''); onChunk?.(acc); } }
+  if (buf) { const r = parseSse(buf + '\n'); blocked ||= r.blocked; if (r.usage && meter) Object.assign(meter, r.usage); if (r.texts.length) { acc += r.texts.join(''); onChunk?.(acc); } }
   if (!acc.trim()) throw new AiError(blocked ? 'Gemini declined to summarize this.' : 'Gemini returned an empty summary.', blocked ? 'blocked' : 'empty');
   return acc;
 }
 
-async function streamClaude({ key, model, system, user, signal, onChunk, json = false }, retried = false) {
+async function streamClaude({ key, model, system, user, signal, onChunk, json = false, meter }, retried = false) {
   const { url, body } = claudeRequest({ model, system, user, json });
   let res;
   try {
@@ -540,14 +567,14 @@ async function streamClaude({ key, model, system, user, signal, onChunk, json = 
     const err = claudeError(res.status, await res.text().catch(() => ''), res.headers.get('retry-after'));
     if ((err.code === 'rate' || res.status === 529) && !retried && err.retry <= 10) {
       await new Promise(r => setTimeout(r, Math.max(1, err.retry) * 1000));
-      return streamClaude({ key, model, system, user, signal, onChunk, json }, true);
+      return streamClaude({ key, model, system, user, signal, onChunk, json, meter }, true);
     }
     throw new AiError(err.message, err.code);
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = '', acc = '', blocked = null, error = null;
-  const take = r => { buf = r.rest; blocked ||= r.blocked; error ||= r.error; if (r.texts.length) { acc += r.texts.join(''); onChunk?.(acc); } };
+  const take = r => { buf = r.rest; blocked ||= r.blocked; error ||= r.error; if (r.usage && meter) Object.assign(meter, r.usage); if (r.texts.length) { acc += r.texts.join(''); onChunk?.(acc); } };
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -609,8 +636,12 @@ function askHelper(msg, { signal, timeout = 150000 } = {}) {
   });
 }
 
-async function runClaudeCode({ model, system, user, signal, onChunk }) {
+async function runClaudeCode({ model, system, user, signal, onChunk, meter }) {
   const reply = await askHelper(claudeCodeRequest({ model, system, user }), { signal });
+  if (reply?.usage && meter) {
+    const { input, output, cacheRead, cacheWrite, costUsd } = reply.usage;
+    Object.assign(meter, { input, output, cacheRead, cacheWrite, costUsd });
+  }
   if (!reply?.ok) {
     const err = claudeCodeError({ reply });
     throw new AiError(err.message, err.code);
@@ -757,7 +788,7 @@ export async function summarizeTab(tab, opts = {}) {
     if (engine === 'cloud') {
       const { system, user } = tabPrompt({ ...ai, instructions, previous, lang: uiLang() });
       r = parseInsight(await logged({ kind: 'tab', engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), title: page.title, url: page.url, system, user },
-        () => streamCloud(st.settings, { system, user, json: true, signal: opts.signal })));
+        meter => streamCloud(st.settings, { system, user, json: true, signal: opts.signal, meter })));
     } else {
       r = await localInsight(ai, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress, previous });
     }
@@ -786,7 +817,7 @@ async function fieldSentence(page, info, instructions, engine, st, opts) {
     if (engine === 'cloud') {
       const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, previous: opts.previous, lang: uiLang(), max: 3000 });
       return parseInsight(await logged({ ...meta, engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), system, user },
-        () => streamCloud(st.settings, { system, user, json: 'sentence', signal: opts.signal })));
+        meter => streamCloud(st.settings, { system, user, json: 'sentence', signal: opts.signal, meter })));
     }
     if (engine === 'local' && st.localApi === 'prompt') {
       const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, previous: opts.previous, lang: localOut() });
@@ -848,7 +879,7 @@ export async function summarizeGroup(group, opts = {}) {
     onStatus?.(`Asking ${CLOUDS[st.settings.cloud].name}…`);
     const { system, user } = groupPrompt({ name: group.name, tabs: pages, instructions, lang: uiLang() });
     text = await logged({ kind: 'group', engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), group: group.name, system, user },
-      () => streamCloud(st.settings, { system, user, signal, onChunk }));
+      meter => streamCloud(st.settings, { system, user, signal, onChunk, meter }));
   } else {
     onStatus?.('Summarizing on this device…');
     const lines = pages.map(p => `- ${p.title}${p.summary ? `: ${p.summary}` : ''}`);
@@ -878,7 +909,7 @@ export async function draftInstructions({ pattern, tab = null, access = false, s
   if (engine === 'cloud') {
     const { system, user } = draftPrompt({ pattern, ...page, lang: uiLang() });
     out = await logged({ kind: 'draft', engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), title: page.title, url: page.url, pattern, system, user },
-      () => streamCloud(st.settings, { system, user, signal }));
+      meter => streamCloud(st.settings, { system, user, signal, meter }));
   } else {
     if (st.localApi !== 'prompt') throw new AiError('Drafting needs Chrome’s Prompt API or a cloud API key.', 'no-engine');
     const { system, user } = draftPrompt({ pattern, ...page, lang: localOut(), max: 5000 });

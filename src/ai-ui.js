@@ -5,7 +5,7 @@
 
 import * as AI from './lib/ai.js';
 import {
-  groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_CODE_MODEL, CLAUDE_CODE_MODEL_RE, claudeCodeInstallCommand, CLOUDS, cloudOf, cloudConsent, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
+  groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_CODE_MODEL, CLAUDE_CODE_MODEL_RE, claudeCodeInstallCommand, CLOUDS, cloudOf, cloudConsent, usageSummary, USAGE_PROVIDERS, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
   effectiveStatus, normalizeStatus, rollupStatus, staleCheck, addMark, stableTitle, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
@@ -25,6 +25,7 @@ const IC = {
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r=".6" fill="currentColor"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
 };
 
@@ -779,6 +780,54 @@ export function openGroupInstructions(g) {
 const CC_OK = 'tabdesk.claudeCodeOk';
 const ccWorked = () => { try { return !!localStorage.getItem(CC_OK); } catch { return false; } };
 
+/* ---------- Settings › Usage ---------- */
+
+const PROVIDER_LABEL = { local: 'On-device', gemini: 'Gemini API', claude: 'Claude API', claudecode: 'Claude Code' };
+const fmtN = n => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(Math.round(n)));
+const fmtUsd = n => (n >= 0.01 ? `$${n.toFixed(2)}` : n > 0 ? `$${n.toFixed(4)}` : '$0');
+const tokensOf = t => t.input + t.output + t.cacheRead + t.cacheWrite;
+
+/** The body of the Usage tab for the last `days` days, from the stored tally. */
+export function usageHtml(store, days, now = Date.now()) {
+  const { providers, total, daily } = usageSummary(store, days, now);
+  if (!total.calls) return '<p class="ai-muted usage-empty">No AI calls in this period yet.</p>';
+  const cc = providers.claudecode;
+  const tiles = [
+    ['Calls', fmtN(total.calls), total.errors ? `${total.errors} failed` : 'none failed'],
+    ['Tokens', fmtN(tokensOf(total)), `${fmtN(total.input + total.cacheRead + total.cacheWrite)} in · ${fmtN(total.output)} out`],
+    ...(cc ? [['Claude Code at API prices', fmtUsd(cc.costUsd), 'An estimate; plans aren’t billed per call']] : []),
+  ];
+  const max = Math.max(1, ...daily.map(d => d.calls));
+  const label = d => new Date(`${d.day}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const bars = days > 1 ? `<div class="usage-chart" role="img" aria-label="Calls per day, last ${days} days">
+      ${daily.map(d => `<div class="usage-col" title="${esc(`${label(d)}: ${d.calls} ${d.calls === 1 ? 'call' : 'calls'}, ${fmtN(d.tokens)} tokens`)}"><i style="height:${d.calls ? Math.max(4, Math.round(d.calls / max * 100)) : 0}%"></i></div>`).join('')}
+    </div><div class="usage-axis ai-muted"><span>${esc(label(daily[0]))}</span><span>Calls per day · most ${max}</span><span>${esc(label(daily.at(-1)))}</span></div>` : '';
+  const rows = USAGE_PROVIDERS.filter(p => providers[p]).map(p => {
+    const t = providers[p];
+    const tok = p === 'local' ? '<td colspan="3" class="ai-muted">not counted on-device</td>'
+      : `<td>${fmtN(t.input + t.cacheWrite)}</td><td>${fmtN(t.cacheRead)}</td><td>${fmtN(t.output)}</td>`;
+    const cost = p === 'claudecode' ? fmtUsd(t.costUsd) : p === 'local' ? 'free' : '—';
+    return `<tr data-provider="${p}"><th scope="row">${PROVIDER_LABEL[p]}</th><td>${t.calls}${t.errors ? ` <span class="ai-bad">(${t.errors} failed)</span>` : ''}</td>${tok}<td>${cost}</td><td>${(t.ms / t.calls / 1000).toFixed(1)} s</td></tr>`;
+  }).join('');
+  return `<div class="usage-tiles">${tiles.map(([k, v, sub]) => `<div class="usage-tile"><div class="ai-muted ai-small">${k}</div><b>${v}</b><div class="ai-muted ai-small">${sub}</div></div>`).join('')}</div>
+    ${bars}
+    <div class="usage-table-wrap"><table class="usage-table"><thead><tr><th scope="col">Provider</th><th scope="col">Calls</th><th scope="col">Input</th><th scope="col">Cached input</th><th scope="col">Output</th><th scope="col">Est. cost</th><th scope="col">Avg time</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="ai-muted ai-small">Tokens are what each provider reported. <b>Claude Code</b>’s cost is its own estimate of what the same calls would cost on the API: on a Pro or Max plan you aren’t charged per call, but they count toward your plan’s usage limits. Gemini and Claude API calls are billed to your key at your plan’s prices; their consoles show the exact amount.</p>`;
+}
+
+function wireUsage(box) {
+  const body = box.querySelector('#usageBody');
+  let days = 7, store = {};
+  const paint = () => { body.innerHTML = usageHtml(store, days); };
+  AI.usageStore().then(s => { store = s; paint(); });
+  box.querySelectorAll('#usageRange [data-days]').forEach(b => b.onclick = () => {
+    days = +b.dataset.days;
+    box.querySelectorAll('#usageRange [data-days]').forEach(x => { x.classList.toggle('on', x === b); x.setAttribute('aria-selected', String(x === b)); });
+    paint();
+  });
+  box.querySelector('#usageClear').onclick = async () => { await AI.clearUsage(); store = {}; paint(); };
+}
+
 /** The Claude Code (local) part of Settings: Test connection, and the install command for each OS. */
 function wireClaudeCode(box, os, extId) {
   const $b = sel => box.querySelector(sel);
@@ -937,7 +986,7 @@ function ruleCount(pattern) {
 }
 
 const TAB_KEY = 'tabdesk.settingsTab';
-const lastTab = () => { try { return localStorage.getItem(TAB_KEY) === 'instructions' ? 'instructions' : 'general'; } catch { return 'general'; } };
+const lastTab = () => { try { const t = localStorage.getItem(TAB_KEY); return ['instructions', 'usage'].includes(t) ? t : 'general'; } catch { return 'general'; } };
 
 export async function openAiSettings(opts = {}) {
   const { focus, newRule, rulesFor: forUrl } = opts;
@@ -958,6 +1007,7 @@ export async function openAiSettings(opts = {}) {
       <nav class="settings-nav" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
         <button class="settings-tab" role="tab" id="setTab-general" data-tab="general" aria-controls="setPanel-general" aria-selected="${tab === 'general'}" tabindex="${tab === 'general' ? 0 : -1}" type="button">${IC.gear}<span>General</span></button>
         <button class="settings-tab" role="tab" id="setTab-instructions" data-tab="instructions" aria-controls="setPanel-instructions" aria-selected="${tab === 'instructions'}" tabindex="${tab === 'instructions' ? 0 : -1}" type="button">${IC.note}<span>Summary instructions</span></button>
+        <button class="settings-tab" role="tab" id="setTab-usage" data-tab="usage" aria-controls="setPanel-usage" aria-selected="${tab === 'usage'}" tabindex="${tab === 'usage' ? 0 : -1}" type="button">${IC.chart}<span>Usage</span></button>
       </nav>
       <div class="dialog-body ai-settings settings-panels">
       <section class="settings-panel" role="tabpanel" id="setPanel-general" aria-labelledby="setTab-general" ${tab === 'general' ? '' : 'hidden'}>
@@ -1048,6 +1098,14 @@ export async function openAiSettings(opts = {}) {
         ${groupRows.length ? `<ul class="ai-glist">${groupRows.map(([k, v]) => `<li data-gk="${esc(k)}"><b>${esc(k)}</b><span>${esc(v.length > 90 ? v.slice(0, 90) + '…' : v)}</span><button class="icon-btn" data-m="gdel" type="button" title="Remove" aria-label="Remove instructions for ${esc(k)}">${IC.close}</button></li>`).join('')}</ul>`
           : '<div class="ai-muted ai-small">None yet. Open a group and choose “AI instructions” from its ⋯ menu.</div>'}
       </div>
+      </section>
+
+      <section class="settings-panel" role="tabpanel" id="setPanel-usage" aria-labelledby="setTab-usage" ${tab === 'usage' ? '' : 'hidden'}>
+      <h3 class="first">AI usage on this device</h3>
+      <p class="ai-muted ai-small">Every summary, group sentence and draft is counted here as it runs. Nothing is sent anywhere.</p>
+      <div class="ai-cc-os" role="tablist" aria-label="Period" id="usageRange">${[[1, 'Today'], [7, '7 days'], [30, '30 days']].map(([d, l]) => `<button class="btn sm${d === 7 ? ' on' : ''}" type="button" role="tab" aria-selected="${d === 7}" data-days="${d}">${l}</button>`).join('')}</div>
+      <div id="usageBody"></div>
+      <div class="ai-status-line"><span class="ai-muted ai-small">Usage is kept for 90 days.</span><button class="btn sm" id="usageClear" type="button">Clear usage</button></div>
       </section>
       </div>
     </div>
@@ -1156,6 +1214,7 @@ export async function openAiSettings(opts = {}) {
       box.querySelectorAll('.ai-cloud').forEach(el => { el.hidden = el.dataset.cloud !== r.value; });
     });
     wireClaudeCode(box, os, extId);
+    wireUsage(box);
     box.querySelectorAll('.ai-cloud:has(.ai-key)').forEach(el => {
       const c = el.dataset.cloud;
       const input = el.querySelector('.ai-key');

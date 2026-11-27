@@ -128,7 +128,8 @@ process.stdin.on('data', d => input += d).on('end', () => {
   const result = /Say OK/.test(input) ? 'OK'
     : /Reply with JSON only, in this order/.test(sys) ? '{"facts": "", "summary": "A tab sentence from Claude Code. Extra.", "status": "idle"}'
     : 'This group is about Claude Code testing. Extra sentence.';
-  console.log(JSON.stringify({ type: 'result', is_error: false, result, modelUsage: { 'claude-haiku-5-5': {} } }));
+  console.log(JSON.stringify({ type: 'result', is_error: false, result, modelUsage: { 'claude-haiku-5-5': {} },
+    usage: { input_tokens: 4, output_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 2000 }, total_cost_usd: 0.25, duration_ms: 1500 }));
 });
 `);
   chmodSync(fake, 0o755);
@@ -584,6 +585,7 @@ try {
   assert.equal(ccCall.args[ccCall.args.indexOf('--model') + 1], 'haiku');
   assert.match(ccCall.sys, /^You look at one browser tab/);
   assert.match(ccCall.input, /purple-otter/, 'the page text reaches claude on stdin');
+  assert.equal(ccCall.args[ccCall.args.indexOf('--effort') + 1], 'low');
   await page.click('[data-act=ai-group]');
   await page.waitForFunction(() => /^This group is about Claude Code testing\.$/.test(document.querySelector('[data-sum^="group:"] .ai-gtext')?.textContent || ''));
   assert.match(await page.textContent('[data-sum^="group:"]'), /Claude Code/);
@@ -591,6 +593,27 @@ try {
   assert.ok(saved.claudeCodeConsentAt > 0);
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-claude-code.png') });
   step('Claude Code (local): Test connection, own consent, tab summary + status and group sentence through the real helper');
+
+  // Settings › Usage: calls, tokens and Claude Code's cost estimate, per provider.
+  await page.click('#settingsBtn');
+  await page.click('[role=tab][data-tab=usage]');
+  await page.waitForSelector('.usage-table tr[data-provider=claudecode]');
+  const ccRow = await page.textContent('.usage-table tr[data-provider=claudecode]');
+  const n = cc.calls().filter(c => !/Say OK/.test(c.input)).length; // Test connection isn't counted
+  const usd = `$${(n * 0.25).toFixed(2)}`;
+  // Each fake call: 4 input + 2000 cache-write tokens, 1000 cache reads, 50 output, $0.25.
+  assert.ok(ccRow.startsWith(`Claude Code${n}${(n * 2.004).toFixed(1)}k${n}.0k${n * 50}${usd}`) && / s$/.test(ccRow),
+    `calls, input + cache writes, cache reads, output, summed cost estimate, time: ${ccRow}`);
+  assert.ok(await page.isVisible('.usage-table tr[data-provider=local]'));
+  assert.ok(await page.isVisible('.usage-table tr[data-provider=claude]'));
+  assert.ok((await page.textContent('.usage-tiles')).includes(`Claude Code at API prices${usd}`));
+  assert.equal(await page.locator('.usage-col').count(), 7);
+  await page.click('#usageRange [data-days="1"]');
+  assert.equal(await page.locator('.usage-col').count(), 0, 'no daily chart for one day');
+  if (SHOTS) { await page.click('#usageRange [data-days="7"]'); await page.screenshot({ path: join(SHOTS, 'settings-usage.png') }); }
+  await page.click('[role=tab][data-tab=general]');
+  await page.click('[data-m=cancel]');
+  step('Settings › Usage counts every call per provider, with tokens and Claude Code’s cost estimate');
 
   // Back to Gemini for the rest of the test.
   await page.click('#settingsBtn');
