@@ -657,7 +657,7 @@ export async function checkTab(tab, opts = {}) {
 
 /**
  * Summarize one tab in one sentence and judge its status. The result is saved by URL.
- * opts: { groupName, force, signal, onProgress(fraction), access, engine? }
+ * opts: { groupName, force, reuse, signal, onProgress(fraction), access, engine? }
  * Skips the model when the page hasn't changed in a way that matters since the last summary (same
  * settings, same text and title once numbers and times are taken out, same page fields).
  * Returns the saved insight: { summary, status, manual?, engine, at, checkedAt, stale?, reason, readable }.
@@ -666,6 +666,9 @@ export async function summarizeTab(tab, opts = {}) {
   const { st, plan, engine, engineErr, page, instructions, fieldInfo, cfg, csig, fsig, prev, sameCfg, sameContent } = await prepareTab(tab, opts);
   if (!engine && !fieldInfo?.status) throw engineErr;
   if (!opts.force && prev?.summary && sameCfg && sameContent) return putInsight(page.url, { cfg, csig, fsig, stale: undefined }, { written: false });
+  // reuse: the page is open in several groups; keep its summary while the page is the same, even if this
+  // group's instructions differ from those it was written with.
+  if (!opts.force && opts.reuse && prev?.summary && sameContent) return putInsight(page.url, { stale: undefined }, { written: false });
   let r;
   if (fieldInfo?.status) {
     r = await fieldSentence(page, fieldInfo, instructions, engine, st, opts);
