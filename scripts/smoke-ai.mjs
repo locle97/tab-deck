@@ -5,7 +5,7 @@
 // Run with: npm run smoke:ai
 
 import { createServer } from 'node:http';
-import { mkdtempSync, cpSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,7 +97,8 @@ function fakes() {
 }
 
 async function launch(ext) {
-  const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), 'tabdesk-ai-')), {
+  const userDir = mkdtempSync(join(tmpdir(), 'tabdesk-ai-'));
+  const ctx = await chromium.launchPersistentContext(userDir, {
     headless: true,
     channel: 'chromium',
     args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`],
@@ -105,7 +106,41 @@ async function launch(ext) {
   });
   await ctx.addInitScript(fakes);
   const sw = ctx.serviceWorkers()[0] || await ctx.waitForEvent('serviceworker');
-  return { ctx, extId: new URL(sw.url()).host };
+  return { ctx, extId: new URL(sw.url()).host, userDir };
+}
+
+/**
+ * Install the real Claude Code helper (native-host/) for this test browser, with a fake `claude` that
+ * answers like `claude -p --output-format json`. Chromium reads user-level native messaging hosts from
+ * <user data dir>/NativeMessagingHosts on Linux.
+ */
+function installFakeClaudeCode(userDir, extId) {
+  const dir = mkdtempSync(join(tmpdir(), 'tabdesk-cc-'));
+  const fake = join(dir, 'claude');
+  writeFileSync(fake, `#!${process.execPath}
+const fs = require('fs');
+const args = process.argv.slice(2);
+if (args[0] === '--version') { console.log('9.9.9 (Claude Code)'); process.exit(0); }
+let input = '';
+process.stdin.on('data', d => input += d).on('end', () => {
+  const sys = fs.readFileSync(args[args.indexOf('--system-prompt-file') + 1], 'utf8');
+  fs.appendFileSync(${JSON.stringify(join(dir, 'calls.jsonl'))}, JSON.stringify({ args, sys, input }) + '\\n');
+  const result = /Say OK/.test(input) ? 'OK'
+    : /Reply with JSON only, in this order/.test(sys) ? '{"facts": "", "summary": "A tab sentence from Claude Code. Extra.", "status": "idle"}'
+    : 'This group is about Claude Code testing. Extra sentence.';
+  console.log(JSON.stringify({ type: 'result', is_error: false, result, modelUsage: { 'claude-haiku-5-5': {} } }));
+});
+`);
+  chmodSync(fake, 0o755);
+  const wrapper = join(dir, 'host');
+  writeFileSync(wrapper, `#!/bin/sh\nTABDESK_CLAUDE=${JSON.stringify(fake)} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(SRC, '..', 'native-host', 'tab-desk-claude-host.mjs'))} "$@"\n`);
+  chmodSync(wrapper, 0o755);
+  const hosts = join(userDir, 'NativeMessagingHosts');
+  mkdirSync(hosts, { recursive: true });
+  writeFileSync(join(hosts, 'com.tabdesk.claude_code.json'), JSON.stringify({
+    name: 'com.tabdesk.claude_code', description: 'test', path: wrapper, type: 'stdio', allowed_origins: [`chrome-extension://${extId}/`],
+  }));
+  return { calls: () => readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)) };
 }
 
 async function openDesk(ctx, extId, errors) {
@@ -158,9 +193,10 @@ const ext = mkdtempSync(join(tmpdir(), 'tabdesk-ext-'));
 cpSync(SRC, ext, { recursive: true });
 const mf = JSON.parse(readFileSync(join(ext, 'manifest.json'), 'utf8'));
 mf.host_permissions = ['<all_urls>'];
+mf.permissions.push('nativeMessaging'); // granted up front: headless Chromium can't answer a permission prompt
 writeFileSync(join(ext, 'manifest.json'), JSON.stringify(mf, null, 2));
 
-const { ctx, extId } = await launch(ext);
+const { ctx, extId, userDir } = await launch(ext);
 try {
   const page = await openDesk(ctx, extId, errors);
   assert.equal(await page.locator('.ai-line .ai-sum').count(), 0, 'nothing summarized before the model is downloaded');
@@ -514,6 +550,48 @@ try {
   assert.ok(saved.claudeConsentAt > 0 && saved.cloudConsentAt > 0);
   if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-claude.png') });
   step('Claude Haiku as the cloud: own key and consent, tab summary + status and group sentence from the Claude API');
+  // Claude Code (local): no key, a native messaging helper runs `claude -p`. The real helper, a fake claude.
+  await page.click('#settingsBtn');
+  await page.check('input[name=aiCloud][value=claudecode]');
+  await page.waitForSelector('#ccTest', { state: 'visible' });
+  assert.equal(await page.isVisible('#aiKey-claude'), false, 'Claude Code has no key field');
+  assert.equal(await page.inputValue('#aiModel-claudecode'), 'haiku');
+  assert.equal(await page.inputValue('#ccCmd'), `./native-host/install.sh ${extId}`, 'the install command names this copy of the extension');
+  await page.click('[data-os=win]');
+  assert.match(await page.inputValue('#ccCmd'), new RegExp(`install\\.ps1 -ExtensionId ${extId}$`));
+  assert.equal(await page.textContent('#ccUn'), '-Uninstall');
+  await page.click('[data-os=linux]');
+  await page.click('#ccTest');
+  await page.waitForFunction(() => /helper isn’t installed/.test(document.querySelector('#ccMsg')?.textContent || ''), null, { timeout: 15000 });
+  assert.equal(await page.evaluate(() => document.querySelector('.ai-cc-install').open), true, 'install steps open when the helper is missing');
+  step('Claude Code: Test connection says plainly when the helper isn’t installed, and shows the install command for each OS');
+  const cc = installFakeClaudeCode(userDir, extId);
+  await page.click('#ccTest');
+  await page.waitForFunction(() => /Connected\./.test(document.querySelector('#ccMsg')?.textContent || ''), null, { timeout: 30000 });
+  assert.match(await page.textContent('#ccMsg'), /9\.9\.9 \(Claude Code\) answered with claude-haiku-5-5/);
+  if (SHOTS) { await page.locator('[data-cloud=claudecode]').scrollIntoViewIfNeeded(); await page.screenshot({ path: join(SHOTS, 'ai-settings-claude-code.png') }); }
+  await page.click('[data-m=ok]');
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
+  await page.hover('.tab:has-text("/alpha")');
+  await page.click('.tab:has-text("/alpha") [data-act=ai-tab]');
+  await page.waitForSelector('#modal:not([hidden]) :text("Send page content to Anthropic Claude Code?")');
+  assert.match(await page.textContent('#modal'), /passed to Claude Code on this computer/);
+  await page.click('[data-m=ok]');
+  await waitLine(page, '/alpha', /^A tab sentence from Claude Code\.$/);
+  assert.match(await page.textContent('.tab:has-text("/alpha") .ai-st'), /Idle/);
+  assert.match(await page.getAttribute('.tab:has-text("/alpha") .ai-sum', 'title'), /Claude Code/);
+  let ccCall = cc.calls().at(-1);
+  assert.equal(ccCall.args[ccCall.args.indexOf('--model') + 1], 'haiku');
+  assert.match(ccCall.sys, /^You look at one browser tab/);
+  assert.match(ccCall.input, /purple-otter/, 'the page text reaches claude on stdin');
+  await page.click('[data-act=ai-group]');
+  await page.waitForFunction(() => /^This group is about Claude Code testing\.$/.test(document.querySelector('[data-sum^="group:"] .ai-gtext')?.textContent || ''));
+  assert.match(await page.textContent('[data-sum^="group:"]'), /Claude Code/);
+  saved = (await page.evaluate(() => chrome.storage.local.get('aiSettings'))).aiSettings;
+  assert.ok(saved.claudeCodeConsentAt > 0);
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-claude-code.png') });
+  step('Claude Code (local): Test connection, own consent, tab summary + status and group sentence through the real helper');
+
   // Back to Gemini for the rest of the test.
   await page.click('#settingsBtn');
   await page.check('input[name=aiCloud][value=gemini]');

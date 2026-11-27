@@ -1,6 +1,7 @@
 // AI summaries: settings, page text extraction, saved tab insights (one-sentence summary + status),
 // the on-device engines (Chrome's built-in Prompt API, falling back to the Summarizer API; both Gemini Nano)
-// and the optional cloud engine (Gemini API or Claude API, with the user's own key).
+// and the optional cloud engine (Gemini API or Claude API with the user's own key, or Claude Code on this
+// computer through a native messaging helper).
 // Runs in the Tab Desk page only: the built-in AI APIs aren't available in service workers.
 
 import {
@@ -11,6 +12,7 @@ import {
   insightKey, groupKey, normalizeStatus, migrateInsightStatuses, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION, contentSig,
   sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES, previousBlock, tabUserText,
   CLOUDS, cloudModel, cloudConsent, consentKey, claudeRequest, claudeHeaders, parseClaudeSse, claudeError,
+  cloudReady, CLAUDE_CODE_HOST, claudeCodeRequest, claudeCodeError,
 } from './ai-core.js';
 import { fieldPlanFor, decideStatus, foundAny, factsLine, fieldsBlock } from './fields.js';
 
@@ -561,10 +563,81 @@ async function streamClaude({ key, model, system, user, signal, onChunk, json = 
   return acc;
 }
 
-/** One call to the cloud the settings pick (Gemini or Claude), with that cloud's key and model. */
+/* ---------- Claude Code on this computer ---------- */
+// Tab Desk can't start programs itself. A small helper (native-host/ in the repo), registered with
+// Chrome as a native messaging host, runs `claude -p` with the user's own Claude Code sign-in and
+// sends the answer back. The helper never touches Claude Code's credentials.
+
+const NATIVE = { permissions: ['nativeMessaging'] };
+export const hasNativeAccess = () => chrome.permissions.contains(NATIVE).catch(() => false);
+/** Ask for the native messaging permission. Call first thing in a click handler, before any other await. */
+export const requestNativeAccess = () => chrome.permissions.request(NATIVE).catch(() => false);
+
+/** Send one message to the helper and wait for its reply. Stopping (signal) disconnects, which ends `claude`. */
+function askHelper(msg, { signal, timeout = 150000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException('Stopped', 'AbortError')); return; }
+    if (typeof chrome.runtime.connectNative !== 'function') {
+      reject(new AiError('Tab Desk needs your permission to talk to the Claude Code helper. Press “Test connection” in Settings › General › Cloud.', 'host'));
+      return;
+    }
+    let port, settled = false;
+    const finish = (fn, v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      try { port?.disconnect(); } catch {}
+      fn(v);
+    };
+    const onAbort = () => finish(reject, new DOMException('Stopped', 'AbortError'));
+    const timer = setTimeout(() => finish(reject, new AiError('The Claude Code helper didn’t answer in time.', 'timeout')), timeout);
+    signal?.addEventListener('abort', onAbort);
+    try {
+      port = chrome.runtime.connectNative(CLAUDE_CODE_HOST);
+    } catch (e) {
+      const err = claudeCodeError({ chromeError: e });
+      finish(reject, new AiError(err.message, err.code));
+      return;
+    }
+    port.onMessage.addListener(reply => finish(resolve, reply));
+    port.onDisconnect.addListener(() => {
+      const err = claudeCodeError({ chromeError: chrome.runtime.lastError?.message || 'Native host has exited.' });
+      finish(reject, new AiError(err.message, err.code));
+    });
+    port.postMessage(msg);
+  });
+}
+
+async function runClaudeCode({ model, system, user, signal, onChunk }) {
+  const reply = await askHelper(claudeCodeRequest({ model, system, user }), { signal });
+  if (!reply?.ok) {
+    const err = claudeCodeError({ reply });
+    throw new AiError(err.message, err.code);
+  }
+  const text = String(reply.text || '');
+  if (!text.trim()) throw new AiError('Claude Code returned an empty summary.', 'empty');
+  onChunk?.(text);
+  return text;
+}
+
+/**
+ * Check the helper and Claude Code: is the helper installed, does it find `claude`, and does a tiny
+ * prompt with this model work (that is, is Claude Code signed in)? Returns { helper, claude, model }.
+ */
+export async function testClaudeCode(model) {
+  const ping = await askHelper({ type: 'ping' }, { timeout: 40000 });
+  if (!ping?.ok) { const e = claudeCodeError({ reply: ping }); throw new AiError(e.message, e.code); }
+  const reply = await askHelper(claudeCodeRequest({ model, system: 'Reply with the single word OK.', user: 'Say OK.' }), { timeout: 150000 });
+  if (!reply?.ok) { const e = claudeCodeError({ reply }); throw new AiError(e.message, e.code); }
+  return { helper: ping.version, claude: ping.claude?.version || '', model: reply.model || model };
+}
+
+/** One call to the cloud the settings pick (Gemini, Claude or Claude Code), with that cloud's key and model. */
 async function streamCloud(settings, opts) {
-  const key = await getApiKey(settings.cloud);
   const model = cloudModel(settings);
+  if (settings.cloud === 'claudecode') return runClaudeCode({ model, ...opts });
+  const key = await getApiKey(settings.cloud);
   return settings.cloud === 'claude' ? streamClaude({ key, model, ...opts }) : streamGemini({ key, model, ...opts });
 }
 
@@ -591,7 +664,7 @@ export async function testApiKey(key, cloud = 'gemini') {
 export async function engineState() {
   const settings = await getSettings();
   const [key, local] = await Promise.all([getApiKey(settings.cloud), localAvailability()]);
-  return { settings, hasKey: !!key, local: local.state, localApi: local.api };
+  return { settings, hasKey: cloudReady(settings.cloud, key), local: local.state, localApi: local.api };
 }
 
 function pickEngine(kind, settings, local, hasKey) {

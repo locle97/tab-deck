@@ -3,6 +3,7 @@
 export const ON_DEVICE_LANGS = ['en', 'es', 'ja', 'de', 'fr'];
 export const DEFAULT_MODEL = 'gemini-flash-latest';
 export const DEFAULT_CLAUDE_MODEL = 'claude-haiku-5-5';
+export const DEFAULT_CLAUDE_CODE_MODEL = 'haiku';
 export const MAX_GROUP_TABS = 20;
 export const MAX_LOCAL_GROUP_TABS = 12;
 export const MAX_INSTRUCTIONS = 2000;
@@ -11,17 +12,19 @@ export const EVERY_DEFAULT = 30, EVERY_MIN = 5, EVERY_MAX = 24 * 60; // interval
 export const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
   engine: 'auto',          // 'auto' | 'local' | 'cloud'
-  cloud: 'gemini',         // which cloud API the 'cloud' engine uses: 'gemini' | 'claude'
+  cloud: 'gemini',         // which cloud the 'cloud' engine uses: 'gemini' | 'claude' | 'claudecode' (Claude Code on this computer)
   auto: 'local',           // interval refresh: 'off' | 'local' (on-device only) | 'all'
   every: EVERY_DEFAULT,    // interval refresh, minutes
   tabLines: false,         // show each tab's summary as a line under its title (otherwise only in the status tooltip)
   model: DEFAULT_MODEL,      // Gemini model
   claudeModel: DEFAULT_CLAUDE_MODEL,
+  claudeCodeModel: DEFAULT_CLAUDE_CODE_MODEL, // passed to `claude -p --model`: an alias (haiku, sonnet) or a full name
   general: '',             // instructions for every summary
   groups: {},              // { [normalized group name]: instructions }
   rules: [],               // [{ pattern, instructions }] for pages whose URL matches
   cloudConsentAt: 0,        // agreed to send page content to Gemini
   claudeConsentAt: 0,       // agreed to send page content to Anthropic
+  claudeCodeConsentAt: 0,   // agreed to send page content to Anthropic through Claude Code
   pageAccessDeclined: false,
   presets: true,           // use the built-in page fields and status rules (GitHub) where no rule of yours has fields
 });
@@ -36,6 +39,8 @@ export function normalizeSettings(s) {
   if (!Object.hasOwn(CLOUDS, out.cloud)) out.cloud = 'gemini';
   if (typeof out.claudeModel !== 'string' || !out.claudeModel.trim()) out.claudeModel = DEFAULT_CLAUDE_MODEL;
   out.claudeModel = out.claudeModel.trim();
+  out.claudeCodeModel = String(out.claudeCodeModel ?? '').trim();
+  if (!CLAUDE_CODE_MODEL_RE.test(out.claudeCodeModel)) out.claudeCodeModel = DEFAULT_CLAUDE_CODE_MODEL;
   delete out.length;
   out.tabLines = out.tabLines === true;
   out.presets = out.presets !== false;
@@ -70,15 +75,21 @@ export const MAX_RULES = 50;
 
 /* ---------- cloud providers ---------- */
 
-/** The cloud APIs the 'cloud' engine can use, each with the user's own key. */
+/**
+ * The clouds the 'cloud' engine can use: two APIs with the user's own key, and Claude Code on this
+ * computer (no key: a small helper runs `claude -p` with the user's Claude Code sign-in).
+ */
 export const CLOUDS = Object.freeze({
   gemini: { name: 'Gemini', company: 'Google', api: 'Gemini API', badge: 'Gemini · cloud' },
   claude: { name: 'Claude', company: 'Anthropic', api: 'Claude API', badge: 'Claude · cloud' },
+  claudecode: { name: 'Claude Code', company: 'Anthropic', api: 'Claude Code', badge: 'Claude Code', keyless: true },
 });
 /** The cloud a saved insight came from. Insights saved before there was a choice came from Gemini. */
 export const cloudOf = ins => (Object.hasOwn(CLOUDS, ins?.cloud ?? '') ? ins.cloud : 'gemini');
-export const cloudModel = settings => (settings.cloud === 'claude' ? settings.claudeModel : settings.model);
-export const consentKey = cloud => (cloud === 'claude' ? 'claudeConsentAt' : 'cloudConsentAt');
+export const cloudModel = settings => (settings.cloud === 'claude' ? settings.claudeModel : settings.cloud === 'claudecode' ? settings.claudeCodeModel : settings.model);
+export const consentKey = cloud => (cloud === 'claude' ? 'claudeConsentAt' : cloud === 'claudecode' ? 'claudeCodeConsentAt' : 'cloudConsentAt');
+/** Is the chosen cloud set up? An API needs its key; Claude Code needs none (a missing helper shows when it's used). */
+export const cloudReady = (cloud, key) => !!CLOUDS[cloud]?.keyless || !!key;
 /** When the user agreed to send page content to the selected cloud (0 if never). */
 export const cloudConsent = settings => settings[consentKey(settings.cloud)] || 0;
 
@@ -721,6 +732,47 @@ export function claudeError(status, body, retryAfter) {
   if (status >= 500) return { code: 'server', message: 'Claude had a problem. Try again in a moment.' };
   if (status === 400 && /credit balance/i.test(msg)) return { code: 'key', message: 'Your Anthropic account is out of credit. Add credit in the Claude Console.' };
   return { code: 'other', message: msg ? `Claude: ${msg}` : `Claude request failed (${status}).` };
+}
+
+/* ---------- Claude Code on this computer (native messaging) ---------- */
+
+/** The native messaging host the install scripts in native-host/ register. */
+export const CLAUDE_CODE_HOST = 'com.tabdesk.claude_code';
+export const CLAUDE_CODE_MODEL_RE = /^[A-Za-z0-9._:\[\]-]{1,80}$/;
+
+/**
+ * The message for the helper. It runs `claude -p` with the system prompt and the user text, with no
+ * tools. There is no structured-output option, so the prompt's own "Reply with JSON only" carries the shape.
+ */
+export function claudeCodeRequest({ model, system, user }) {
+  return { type: 'prompt', model, system, user };
+}
+
+/**
+ * Turn a failure into a short message for people. Either a reply from the helper ({ code, message })
+ * or the error Chrome gives when it can't start or keep talking to the helper (chrome.runtime.lastError).
+ */
+export function claudeCodeError({ reply, chromeError } = {}) {
+  const install = 'Install it from Settings › General › Cloud › Claude Code (local).';
+  if (chromeError != null) {
+    const m = String(chromeError?.message ?? chromeError);
+    if (/not found/i.test(m)) return { code: 'host', message: `Tab Desk’s Claude Code helper isn’t installed on this computer. ${install}` };
+    if (/forbidden/i.test(m)) return { code: 'host', message: 'The Claude Code helper is installed for a different copy of Tab Desk. Run the install command from Settings again; it includes this copy’s ID.' };
+    if (/exited|communicating|failed to start|invalid/i.test(m)) return { code: 'host', message: `The Claude Code helper stopped before it answered. Check that Node.js 18+ is installed, then run the install command from Settings again. (${m})` };
+    return { code: 'host', message: `Couldn’t talk to the Claude Code helper: ${m}` };
+  }
+  if (reply && !reply.ok) {
+    const code = ['no-cli', 'auth', 'model', 'rate', 'timeout'].includes(reply.code) ? reply.code : 'other';
+    return { code: code === 'auth' ? 'key' : code === 'no-cli' ? 'host' : code, message: String(reply.message || 'Claude Code failed.') };
+  }
+  return { code: 'other', message: 'The Claude Code helper gave no answer.' };
+}
+
+/** The command that installs the helper for this copy of Tab Desk. os: 'mac' | 'linux' | 'win'. */
+export function claudeCodeInstallCommand(os, extId) {
+  return os === 'win'
+    ? `powershell -ExecutionPolicy Bypass -File native-host\\install.ps1 -ExtensionId ${extId}`
+    : `./native-host/install.sh ${extId}`;
 }
 
 /* ---------- cache ---------- */

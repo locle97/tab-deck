@@ -5,7 +5,7 @@
 
 import * as AI from './lib/ai.js';
 import {
-  groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, CLOUDS, cloudOf, cloudConsent, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
+  groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_CODE_MODEL, CLAUDE_CODE_MODEL_RE, claudeCodeInstallCommand, CLOUDS, cloudOf, cloudConsent, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
   effectiveStatus, normalizeStatus, rollupStatus, staleCheck, addMark, stableTitle, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
@@ -14,7 +14,8 @@ import { parseFields, parseStatusRules, decideStatus, factsLine, PRESETS } from 
 
 const ORIGINS = { gemini: ['https://generativelanguage.googleapis.com/*'], claude: ['https://api.anthropic.com/*'] };
 const KEY_PAGE = { gemini: 'https://aistudio.google.com/apikey', claude: 'https://platform.claude.com/settings/keys' };
-/** Who made a saved summary, for its badge: "On-device", "Gemini · cloud", "Claude · cloud" or "No AI". */
+const KEY_CLOUDS = ['gemini', 'claude']; // the clouds that use an API key (Claude Code uses the helper instead)
+/** Who made a saved summary, for its badge: "On-device", "Gemini · cloud", "Claude · cloud", "Claude Code" or "No AI". */
 const engineLabel = ins => (ins.engine === 'cloud' ? CLOUDS[cloudOf(ins)].badge : ins.engine === 'none' ? 'No AI' : 'On-device');
 
 const IC = {
@@ -277,7 +278,7 @@ export function aiCommands(cur) {
     c.push({ type: 'cmd', label: `Summarize “${cur.name}”`, sub: 'One sentence for the group and each tab, with statuses', ico: IC.spark, run: () => start('group', cur.id) });
     c.push({ type: 'cmd', label: `AI instructions for “${cur.name}”`, sub: 'Tell the AI how to summarize this group', ico: IC.note, run: () => openGroupInstructions(cur) });
   }
-  c.push({ type: 'cmd', label: 'Settings', sub: 'AI engine, Gemini or Claude API key, summary instructions', ico: IC.gear, run: () => openAiSettings() });
+  c.push({ type: 'cmd', label: 'Settings', sub: 'AI engine, Gemini or Claude API key, Claude Code, summary instructions', ico: IC.gear, run: () => openAiSettings() });
   return c;
 }
 
@@ -711,9 +712,15 @@ function askCloudConsent(kind, then) {
   const c = CLOUDS[cloud];
   const terms = cloud === 'claude'
     ? 'Anthropic handles it under the terms of the Anthropic account your key belongs to.'
+    : cloud === 'claudecode'
+    ? 'Anthropic handles it under the terms of the Claude account you signed in to Claude Code with, and it counts toward that account’s usage.'
     : 'Google handles it under the Gemini API terms for your key. On the free tier, Google may use what you send to improve its products.';
+  const what = kind === 'group' ? 'For a group summary, the text of the readable tabs in the group' : 'The text of this page';
+  const how = cloud === 'claudecode'
+    ? `will be passed to Claude Code on this computer, which sends it to Anthropic with your Claude Code sign-in.`
+    : `will be sent to ${c.company}’s ${c.api} using your API key.`;
   ctx.openModal(`<div class="dialog-head"><h2>Send page content to ${c.company} ${c.name}?</h2>
-      <p>${kind === 'group' ? 'For a group summary, the text of the readable tabs in the group' : 'The text of this page'} will be sent to ${c.company}’s ${c.api} using your API key.</p></div>
+      <p>${what} ${how}</p></div>
     <div class="dialog-body ai-muted"><p>${terms} Tab Desk has no server of its own and never sees your data.</p>
       <p>Summaries made by ${c.name} are marked <span class="ai-engine cloud">${c.badge}</span>. You’ll only be asked once; you can turn the cloud off any time in Settings.</p></div>
     <div class="dialog-foot">${localOk ? '<button class="btn" data-m="local" type="button">Use on-device instead</button>' : ''}<button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Send to ${c.name}</button></div>`,
@@ -767,6 +774,46 @@ export function openGroupInstructions(g) {
 }
 
 /* ---------- settings ---------- */
+
+// Remembers (in this browser only) that Test connection once worked, so the install steps start folded.
+const CC_OK = 'tabdesk.claudeCodeOk';
+const ccWorked = () => { try { return !!localStorage.getItem(CC_OK); } catch { return false; } };
+
+/** The Claude Code (local) part of Settings: Test connection, and the install command for each OS. */
+function wireClaudeCode(box, os, extId) {
+  const $b = sel => box.querySelector(sel);
+  const cmd = $b('#ccCmd'), msg = $b('#ccMsg'), dot = $b('#ccDot');
+  box.querySelectorAll('[data-os]').forEach(b => b.onclick = () => {
+    box.querySelectorAll('[data-os]').forEach(x => { x.classList.toggle('on', x === b); x.setAttribute('aria-selected', String(x === b)); });
+    cmd.value = claudeCodeInstallCommand(b.dataset.os, extId);
+    $b('#ccUn').textContent = b.dataset.os === 'win' ? '-Uninstall' : '--uninstall';
+  });
+  $b('#ccCopy').onclick = async e => {
+    try { await navigator.clipboard.writeText(cmd.value); } catch { cmd.select(); document.execCommand('copy'); }
+    e.target.textContent = 'Copied';
+    setTimeout(() => { e.target.textContent = 'Copy'; }, 1500);
+  };
+  $b('#ccTest').onclick = async e => {
+    // Ask for the permission inside the click, before any other await.
+    const granted = AI.requestNativeAccess();
+    const btn = e.target;
+    btn.disabled = true;
+    dot.className = 'ai-dot downloading';
+    msg.textContent = 'Checking the helper and Claude Code… (the first answer can take a few seconds)';
+    try {
+      if (!(await granted)) throw new Error('Chrome didn’t allow Tab Desk to talk to the helper. Press Test connection again and choose Allow.');
+      const model = $b('#aiModel-claudecode').value.trim() || DEFAULT_CLAUDE_CODE_MODEL;
+      const r = await AI.testClaudeCode(model);
+      dot.className = 'ai-dot available';
+      msg.innerHTML = `<span class="ai-ok">Connected.</span> ${esc(r.claude || 'Claude Code')} answered with ${esc(r.model)}.`;
+      try { localStorage.setItem(CC_OK, '1'); } catch {}
+    } catch (err) {
+      dot.className = 'ai-dot unavailable';
+      msg.innerHTML = `<span class="ai-bad">${esc(err.message)}</span>`;
+      if (err.code === 'host') $b('.ai-cc-install').open = true;
+    } finally { btn.disabled = false; }
+  };
+}
 
 const LOCAL_LABEL = {
   available: 'Ready on this device.',
@@ -897,6 +944,8 @@ export async function openAiSettings(opts = {}) {
   await refreshState();
   const s = state.settings;
   const keys = { gemini: await AI.getApiKey('gemini'), claude: await AI.getApiKey('claude') };
+  const extId = chrome.runtime.id;
+  const os = /Win/i.test(navigator.userAgentData?.platform || navigator.platform) ? 'win' : /Mac/i.test(navigator.userAgentData?.platform || navigator.platform) ? 'mac' : 'linux';
   const saved = await AI.insightCount();
   const strip = await getTabStrip();
   const groupRows = Object.entries(s.groups);
@@ -917,13 +966,13 @@ export async function openAiSettings(opts = {}) {
       <p class="ai-muted ai-small ai-indent">Keeps only the active tab’s group open in Chrome’s tab bar, in that window. Ungrouped tabs leave the groups as they are.</p>
 
       <h3>AI summaries</h3>
-      <p class="ai-muted ai-small">One sentence and a status for every tab. Runs on your device by default; add your own Gemini or Claude API key for the cloud.</p>
+      <p class="ai-muted ai-small">One sentence and a status for every tab. Runs on your device by default; add your own Gemini or Claude API key, or use Claude Code on this computer.</p>
       <label class="ai-check"><input type="checkbox" id="aiEnabled" ${s.enabled ? 'checked' : ''}><span>Show AI summaries and statuses</span></label>
       <label class="ai-check"><input type="checkbox" id="aiTabLines" ${s.tabLines ? 'checked' : ''}><span>Show the summary under each tab</span></label>
       <p class="ai-muted ai-small ai-indent">When off, hover a tab’s status to read its summary.</p>
 
       <h3>Engine</h3>
-      ${radio('aiEngine', 'auto', s.engine, 'Auto', 'On-device for tabs when ready. The cloud for groups when you’ve added a key.')}
+      ${radio('aiEngine', 'auto', s.engine, 'Auto', 'On-device for tabs when ready. The cloud for groups when you’ve set one up below.')}
       ${radio('aiEngine', 'local', s.engine, 'On-device only', 'Nothing leaves your computer.')}
       ${radio('aiEngine', 'cloud', s.engine, 'Cloud only', 'Always use your key for the cloud chosen below.')}
       <div class="ai-status-line"><span class="ai-dot ${state.local}"></span><span>On-device model (Gemini Nano): ${esc(LOCAL_LABEL[state.local] || state.local)}${state.localApi === 'summarizer' ? ' Statuses need Chrome’s Prompt API, which isn’t available here, so on-device summaries come without a status.' : ''}</span>
@@ -941,7 +990,20 @@ export async function openAiSettings(opts = {}) {
       <h3>Cloud <span class="ai-muted">(optional)</span></h3>
       ${radio('aiCloud', 'gemini', s.cloud, 'Gemini API', 'Google’s Gemini, with your key from Google AI Studio.')}
       ${radio('aiCloud', 'claude', s.cloud, 'Claude Haiku', 'Anthropic’s Claude Haiku, with your key from the Claude Console.')}
-      ${['gemini', 'claude'].map(c => `<div class="ai-cloud" data-cloud="${c}" ${s.cloud === c ? '' : 'hidden'}>
+      ${radio('aiCloud', 'claudecode', s.cloud, 'Claude Code (local)', 'Claude Code on this computer, with the account you’re signed in to it with. No API key; needs a small helper installed once.')}
+      <div class="ai-cloud" data-cloud="claudecode" ${s.cloud === 'claudecode' ? '' : 'hidden'}>
+      <div class="ai-status-line"><span class="ai-dot unavailable" id="ccDot"></span><span class="ai-cc-msg" id="ccMsg">Press Test connection to check the helper and your Claude Code sign-in.</span><button class="btn sm" id="ccTest" type="button">Test connection</button></div>
+      <label class="ai-field"><span>Claude Code model</span><input id="aiModel-claudecode" type="text" spellcheck="false" value="${esc(s.claudeCodeModel)}" placeholder="${DEFAULT_CLAUDE_CODE_MODEL}"></label>
+      <div class="ai-muted ai-small">An alias like <code>haiku</code> or <code>sonnet</code>, or a full model name. Haiku is fastest and uses the least of your plan.</div>
+      <details class="ai-cc-install" ${ccWorked() ? '' : 'open'}><summary>Install the helper</summary>
+        <p class="ai-small">Tab Desk can’t start programs on its own, so a small helper runs <code>claude -p</code> for it. It uses your existing Claude Code sign-in and never reads your credentials. You need <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js 18+</a> and <a href="https://claude.com/claude-code" target="_blank" rel="noopener">Claude Code</a>, signed in (<code>claude</code> works in a terminal).</p>
+        <p class="ai-small">In a terminal, from the Tab Desk folder (the one with <code>native-host</code> in it), run:</p>
+        <div class="ai-cc-os" role="tablist" aria-label="Operating system">${[['mac', 'macOS'], ['linux', 'Linux'], ['win', 'Windows']].map(([k, l]) => `<button class="btn sm${k === os ? ' on' : ''}" type="button" role="tab" aria-selected="${k === os}" data-os="${k}">${l}</button>`).join('')}</div>
+        <div class="ai-key-row"><input id="ccCmd" readonly spellcheck="false" value="${esc(claudeCodeInstallCommand(os, extId))}" aria-label="Install command"><button class="btn sm" id="ccCopy" type="button">Copy</button></div>
+        <p class="ai-muted ai-small">This copy of Tab Desk has the ID <code>${esc(extId)}</code>, which the command includes. Then restart Chrome if Test connection says the helper isn’t installed. To remove it, run the same script with <code id="ccUn">${os === 'win' ? '-Uninstall' : '--uninstall'}</code>.</p>
+      </details>
+      </div>
+      ${KEY_CLOUDS.map(c => `<div class="ai-cloud" data-cloud="${c}" ${s.cloud === c ? '' : 'hidden'}>
       <div class="ai-key-row">
         <input id="aiKey-${c}" class="ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a key from ${c === 'claude' ? 'the Claude Console' : 'Google AI Studio'}" value="${esc(keys[c])}" aria-label="${CLOUDS[c].api} key">
         <button class="btn sm" data-keyshow type="button">Show</button>
@@ -955,7 +1017,7 @@ export async function openAiSettings(opts = {}) {
       <div class="ai-status-line"><span class="ai-dot ${state.access ? 'available' : 'unavailable'}"></span><span id="aiAccessText">Page access: ${state.access ? 'Tab Desk can read the text of pages it summarizes.' : 'Off. Summaries use titles and addresses only.'}</span>
         <button class="btn sm" id="aiAccess" type="button">${state.access ? 'Revoke' : 'Allow'}</button></div>
       <div class="ai-status-line"><span id="aiSavedText">${saved} saved tab ${saved === 1 ? 'summary' : 'summaries'} on this device.</span><button class="btn sm" id="aiClear" type="button" ${saved ? '' : 'disabled'}>Clear</button></div>
-      ${['gemini', 'claude'].filter(c => s[consentKey(c)]).map(c => `<div class="ai-muted ai-small">You agreed to send page content to ${CLOUDS[c].name}. Removing your ${CLOUDS[c].name} key resets this.</div>`).join('')}
+      ${Object.keys(CLOUDS).filter(c => s[consentKey(c)]).map(c => `<div class="ai-muted ai-small">You agreed to send page content to ${CLOUDS[c].name}. ${CLOUDS[c].keyless ? '' : `Removing your ${CLOUDS[c].name} key resets this.`}</div>`).join('')}
       </section>
 
       <section class="settings-panel" role="tabpanel" id="setPanel-instructions" aria-labelledby="setTab-instructions" ${tab === 'instructions' ? '' : 'hidden'}>
@@ -1093,7 +1155,8 @@ export async function openAiSettings(opts = {}) {
     box.querySelectorAll('input[name=aiCloud]').forEach(r => r.onchange = () => {
       box.querySelectorAll('.ai-cloud').forEach(el => { el.hidden = el.dataset.cloud !== r.value; });
     });
-    box.querySelectorAll('.ai-cloud').forEach(el => {
+    wireClaudeCode(box, os, extId);
+    box.querySelectorAll('.ai-cloud:has(.ai-key)').forEach(el => {
       const c = el.dataset.cloud;
       const input = el.querySelector('.ai-key');
       const msg = el.querySelector('.ai-key-msg');
@@ -1129,10 +1192,15 @@ export async function openAiSettings(opts = {}) {
     $b('#aiClear').onclick = async e => { await AI.clearInsights(); e.target.disabled = true; $b('#aiSavedText').textContent = 'No saved summaries on this device.'; };
     box.querySelectorAll('[data-m=gdel]').forEach(b => b.onclick = () => { const li = b.closest('li'); removedGroups.add(li.dataset.gk); li.remove(); });
     $b('[data-m=ok]').onclick = async () => {
+      const cloud = box.querySelector('input[name=aiCloud]:checked')?.value || 'gemini';
+      const ccModel = $b('#aiModel-claudecode').value.trim() || DEFAULT_CLAUDE_CODE_MODEL;
+      if (!CLAUDE_CODE_MODEL_RE.test(ccModel)) { ctx.toast('The Claude Code model name can only have letters, numbers, dots, dashes and colons.'); return; }
+      // Claude Code needs the native messaging permission. Ask inside the click, before any await.
+      const native = cloud === 'claudecode' ? AI.requestNativeAccess() : Promise.resolve(true);
       const newKeys = { gemini: $b('#aiKey-gemini').value.trim(), claude: $b('#aiKey-claude').value.trim() };
       const changed = c => newKeys[c] !== keys[c];
       // Ask for the API hosts of new keys inside the click, before any await.
-      const origins = ['gemini', 'claude'].filter(c => newKeys[c] && changed(c)).flatMap(c => ORIGINS[c]);
+      const origins = KEY_CLOUDS.filter(c => newKeys[c] && changed(c)).flatMap(c => ORIGINS[c]);
       const perm = origins.length ? chrome.permissions.request({ origins }).catch(() => false) : Promise.resolve(true);
       const rulesOut = [...box.querySelectorAll('.ai-rule')].map(el => ({
         el,
@@ -1163,7 +1231,8 @@ export async function openAiSettings(opts = {}) {
       const groups = { ...state.settings.groups };
       removedGroups.forEach(k => delete groups[k]);
       await perm;
-      for (const c of ['gemini', 'claude']) {
+      if (!(await native)) ctx.toast('Chrome didn’t allow talking to the Claude Code helper. Press Test connection to try again.');
+      for (const c of KEY_CLOUDS) {
         await AI.setApiKey(newKeys[c], c);
         if (!newKeys[c] && keys[c]) chrome.permissions.remove({ origins: ORIGINS[c] }).catch(() => {});
       }
@@ -1174,14 +1243,15 @@ export async function openAiSettings(opts = {}) {
         engine: box.querySelector('input[name=aiEngine]:checked')?.value || 'auto',
         auto: box.querySelector('input[name=aiAuto]:checked')?.value || 'local',
         every: +$b('#aiEvery').value || state.settings.every,
-        cloud: box.querySelector('input[name=aiCloud]:checked')?.value || 'gemini',
+        cloud,
+        claudeCodeModel: ccModel,
         model: $b('#aiModel-gemini').value.trim() || DEFAULT_MODEL,
         claudeModel: $b('#aiModel-claude').value.trim() || DEFAULT_CLAUDE_MODEL,
         general: $b('#aiGeneral').value.trim(),
         groups,
         rules: rulesOut.filter(r => r.pattern && (r.instructions || r.fields)).map(({ el, ...r }) => r),
         presets: $b('#aiPresets').checked,
-        ...Object.fromEntries(['gemini', 'claude'].filter(changed).map(c => [consentKey(c), 0])),
+        ...Object.fromEntries(KEY_CLOUDS.filter(changed).map(c => [consentKey(c), 0])),
       });
       await refreshState();
       ctx.closeModal();
