@@ -257,7 +257,8 @@ test('addMark: the stronger reason wins and the wait restarts', () => {
   const a = addMark(undefined, 'nav', 0);
   const b = addMark(a, 'title', 1000);
   assert.deepEqual(b, { reason: 'nav', due: 1000 + REFRESH.settle });
-  assert.equal(addMark({ reason: 'title', due: 0 }, 'worked', 0).reason, 'worked');
+  assert.equal(addMark({ reason: 'nav', due: 0 }, 'left', 0).reason, 'left');
+  assert.equal(addMark({ reason: 'left', due: 0 }, 'title', 0).reason, 'left');
 });
 
 test('stableTitle drops unread counts in front', () => {

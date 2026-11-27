@@ -57,6 +57,7 @@ export async function initAi(c) {
   AI.onSettingsChanged(async () => { await refreshState(); ctx.render(); kickAuto(); });
   AI.onInsightsChanged(schedulePaint);
   watchTabs();
+  loadLastRefresh();
   chrome.permissions.onAdded.addListener(refreshAccess);
   chrome.permissions.onRemoved.addListener(refreshAccess);
   document.getElementById('settingsBtn')?.addEventListener('click', () => openAiSettings());
@@ -297,6 +298,7 @@ export function handleAiAction(a, el, row, g) {
     case 'ai-dismiss': if (g) { groupRuns.delete(g.id); AI.clearGroupInsight(g.name); } return true;
     case 'ai-instr': if (g) openGroupInstructions(g); return true;
     case 'ai-settings': openAiSettings(); return true;
+    case 'ai-refresh-now': refreshNow(); return true;
     case 'ai-status': if (tid != null) statusMenu(el, tid); return true;
     case 'ai-expand': el.classList.toggle('is-open'); return true;
   }
@@ -399,6 +401,7 @@ async function runTab({ tabId, force }) {
   busy.delete(tabId);
   if (state.local !== 'available') refreshState();
   paintTab(tabId);
+  paintNext();
   settle(tabId);
 }
 
@@ -438,9 +441,10 @@ async function runGroup(id, force) {
 /* ---------- keeping summaries up to date ---------- */
 // Summaries are rewritten only when you press Summarize, or by the interval refresh every
 // `settings.every` minutes. Between those, a tab that gives a change signal (a new address, a reload,
-// a title change with unread counts aside, or leaving it after working in it) is read once it settles,
-// and its summary is marked outdated if the page changed in a way that matters (AI.checkTab, no model
-// call). When Tab Desk opens, tabs visited since their last check are read too. Every Tab Desk page
+// a title change with unread counts aside) is read once it settles, and its summary is marked outdated
+// if the page changed in a way that matters (AI.checkTab, no model call). Leaving a tab you were on for
+// a few seconds summarizes it (when the refresh setting allows a model), so its status is current;
+// the model is skipped if the page didn't change. When Tab Desk opens, tabs visited since their last check are read too. Every Tab Desk page
 // records the signals, but only one acts on them (the full page when it is open).
 
 const LAST_REFRESH_KEY = 'aiLastRefresh';
@@ -470,7 +474,7 @@ function watchTabs() {
   });
   chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
     const prev = activeIn.get(windowId), now = Date.now();
-    if (prev && prev.tabId !== tabId && now - prev.since >= REFRESH.worked) mark(prev.tabId, 'worked');
+    if (prev && prev.tabId !== tabId && now - prev.since >= REFRESH.left) mark(prev.tabId, 'left');
     activeIn.set(windowId, { tabId, since: now });
   });
   chrome.tabs.onRemoved.addListener(id => { marks.delete(id); sighted.delete(id); titles.delete(id); });
@@ -517,10 +521,20 @@ async function autoPass() {
   const now = Date.now();
   let next = Infinity;
 
+  const canRun = refreshAllowed();
   // Change signals: read the tab and mark its summary outdated if the page changed.
   for (const { t, owner } of items) {
     if (!liveTab(t) || checking.has(t.id) || queued.has(t.id) || busy.has(t.id)) continue;
     const m = marks.get(t.id);
+    // You left this tab: summarize it (the model is skipped when the page didn't change).
+    if (m?.reason === 'left' && canRun && !t.active) {
+      if (now < m.due) { next = Math.min(next, m.due); continue; }
+      marks.delete(t.id);
+      sighted.add(t.id);
+      tabErrors.delete(t.id);
+      enqueue(t.id, false);
+      continue;
+    }
     const r = staleCheck({ ins: AI.tabInsight(urlOf(t)), mark: m, active: t.active, lastAccessed: t.lastAccessed, firstSight: !sighted.has(t.id), now });
     sighted.add(t.id);
     if (r.at) { next = Math.min(next, r.at); continue; }
@@ -533,7 +547,7 @@ async function autoPass() {
   }
 
   // Interval refresh: summarize again where the page changed (the model is skipped where it didn't).
-  if (refreshAllowed()) {
+  if (canRun) {
     if (lastRefresh == null) {
       // The first time, start counting now rather than summarizing every tab at once.
       lastRefresh = (await chrome.storage.local.get(LAST_REFRESH_KEY))[LAST_REFRESH_KEY];
@@ -543,11 +557,62 @@ async function autoPass() {
     if (Date.now() >= due) {
       lastRefresh = Date.now();
       chrome.storage.local.set({ [LAST_REFRESH_KEY]: lastRefresh });
-      for (const { t } of items) if (liveTab(t) && !tabErrors.has(t.id)) enqueue(t.id, false);
+      for (const { t } of items) if (liveTab(t) && !tabErrors.has(t.id)) { refreshing.add(t.id); enqueue(t.id, false); }
       next = Math.min(next, nextRefreshAt(lastRefresh, s.every));
     } else next = Math.min(next, due);
   }
+  paintNext();
   if (next < Infinity) kickAuto(Math.max(1000, next - Date.now()));
+}
+
+/* ---------- next refresh countdown ---------- */
+// "Next refresh in 12 min" in the dashboard and side panel headers. Clicking it refreshes now.
+
+const refreshing = new Set(); // tab ids queued by the running interval refresh
+let nextTimer = null;
+
+async function loadLastRefresh() {
+  if (lastRefresh == null) lastRefresh = (await chrome.storage.local.get(LAST_REFRESH_KEY))[LAST_REFRESH_KEY] || null;
+  chrome.storage.onChanged.addListener((ch, area) => {
+    if (area !== 'local' || !(LAST_REFRESH_KEY in ch)) return;
+    lastRefresh = ch[LAST_REFRESH_KEY].newValue || null;
+    paintNext();
+    kickAuto();
+  });
+  nextTimer = setInterval(paintNext, 15 * 1000);
+}
+
+function nextInner() {
+  const s = state.settings;
+  if (!s.enabled || !state.access || !refreshAllowed()) return null;
+  const left = [...refreshing].filter(id => queued.has(id) || busy.has(id)).length;
+  if (left) return { text: `Refreshing… ${left} left`, tip: 'Summarizing tabs whose page changed' };
+  if (!lastRefresh) return { text: `Next refresh in ${s.every} min`, tip: 'Refresh now' };
+  const ms = nextRefreshAt(lastRefresh, s.every) - Date.now();
+  const text = ms <= 30 * 1000 ? 'Refreshing soon' : ms < 60 * 60 * 1000 ? `Next refresh in ${Math.ceil(ms / 60000)} min` : `Next refresh in ${Math.floor(ms / 3600000)} h ${Math.ceil((ms % 3600000) / 60000)} min`;
+  return { text, tip: `Tabs that changed are summarized again every ${s.every} min. Click to refresh now.` };
+}
+
+/** The countdown chip for a header, or '' when there is no automatic refresh. */
+export function nextRefreshChip() {
+  if (!aiEnabled()) return '';
+  return `<span class="ai-next-wrap" data-ai-next>${nextChipInner()}</span>`;
+}
+function nextChipInner() {
+  const n = nextInner();
+  if (!n) return '';
+  return `<button class="ai-next" data-act="ai-refresh-now" type="button" title="${esc(n.tip)}">${IC.refresh}<span>${esc(n.text)}</span></button>`;
+}
+function paintNext() {
+  for (const id of [...refreshing]) if (!queued.has(id) && !busy.has(id)) refreshing.delete(id);
+  document.querySelectorAll('[data-ai-next]').forEach(el => { const h = nextChipInner(); if (el.innerHTML !== h) el.innerHTML = h; });
+}
+
+/** Run the interval refresh now, in whichever Tab Desk page runs it (the others hear it through storage). */
+function refreshNow() {
+  lastRefresh = 1;
+  chrome.storage.local.set({ [LAST_REFRESH_KEY]: 1 });
+  kickAuto(50);
 }
 
 /* ---------- painting ---------- */

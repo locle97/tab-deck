@@ -511,6 +511,7 @@ function dashBar() {
         <button class="icon-btn" data-act="view" data-v="grid" type="button" aria-pressed="${dash.view === 'grid'}" title="Grid" aria-label="Grid">${ICON.cols}</button>
         <button class="icon-btn" data-act="view" data-v="list" type="button" aria-pressed="${dash.view === 'list'}" title="List" aria-label="List">${ICON.rows}</button>
       </span>
+      ${ai && total ? AIUI.nextRefreshChip() : ''}
       ${ai && total ? `<button class="btn sm" data-act="sum-all" type="button" ${running ? 'disabled' : ''} title="Summarize every group and its tabs">${AIUI.sparkIcon()}<span>Summarize all</span></button>` : ''}
       <button class="btn sm dash-search" data-act="search" type="button" title="Jump to a tab or group">${ICON.search}<span>Search</span><kbd>${MOD} K</kbd></button>
       ${canOpenPanel() ? `<button class="icon-btn" data-act="open-panel" type="button" title="Open the side panel, to watch your groups while you work in a tab" aria-label="Open the side panel">${ICON.panel}</button>` : ''}
@@ -533,6 +534,7 @@ function panelBar() {
     <div class="dash-tools">
       <button class="btn sm ghost" data-act="sort" type="button" aria-haspopup="menu" title="Sort groups">${ICON.sort}<span>${SORTS[sortMode()]}</span></button>
       <span class="grow"></span>
+      ${ai && total ? AIUI.nextRefreshChip() : ''}
       ${ai && total ? `<button class="icon-btn" data-act="sum-all" type="button" ${running ? 'disabled' : ''} title="Summarize every group and its tabs" aria-label="Summarize all">${AIUI.sparkIcon()}</button>` : ''}
       <button class="icon-btn" data-act="search" type="button" title="Jump to a tab or group (${MOD} K)" aria-label="Search">${ICON.search}</button>
       <button class="icon-btn" data-act="settings" type="button" title="Settings: tab strip, AI summaries and summary instructions" aria-label="Settings">${ICON.gear}</button>
