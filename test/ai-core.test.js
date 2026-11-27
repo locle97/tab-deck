@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  normalizeSettings, groupKey, instructionsFor, chooseEngine, cleanText, chunkText, langCode, isReadableUrl,
+  normalizeSettings, groupKey, instructionsFor, chooseEngine, cleanText, chunkText, langCode, isReadableUrl, notLoaded,
   tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, cacheKey, pruneCache, renderSummary,
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
   effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, staleCheck, addMark, nextRefreshAt, stableTitle, stableText, contentSig, REFRESH, EVERY_DEFAULT, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
@@ -399,4 +399,13 @@ test('the previous status and summary go into the tab prompt as context', () => 
   assert.match(p.system, /The page always wins/);
   assert.ok(!tabPrompt({ title: 'T', url: 'u', text: 'body' }).user.includes('Previous analysis'));
   assert.equal(tabUserText({ title: 'T', url: 'u', text: '' }), 'Title: T\nURL: u\n<page>\n(The page text could not be read. Work from the title and URL only.)\n</page>');
+});
+
+test('notLoaded: asleep, frozen, or restored after a restart and not opened yet', () => {
+  assert.equal(notLoaded({ status: 'complete' }), false);
+  assert.equal(notLoaded({ status: 'loading' }), false);
+  assert.equal(notLoaded({ status: 'unloaded' }), true, 'Chrome restores tabs unloaded until you open them');
+  assert.equal(notLoaded({ status: 'complete', discarded: true }), true);
+  assert.equal(notLoaded({ status: 'complete', frozen: true }), true);
+  assert.equal(notLoaded(null), false);
 });

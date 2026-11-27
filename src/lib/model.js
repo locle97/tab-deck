@@ -243,7 +243,7 @@ export function cardTabs(tabs, limit, showAll = false) {
 /** One-line facts about a group for its dashboard card: "4 tabs · 2 sites · 1 sleeping". */
 export function groupFacts(tabs) {
   const sites = new Set(tabs.map(t => siteName(t.url || t.pendingUrl || '')).filter(Boolean)).size;
-  const sleeping = tabs.filter(t => t.discarded || t.frozen).length;
+  const sleeping = tabs.filter(t => t.discarded || t.frozen || t.status === 'unloaded').length;
   const playing = tabs.filter(t => t.audible).length;
   const parts = [plural(tabs.length, 'tab')];
   if (sites) parts.push(plural(sites, 'site'));

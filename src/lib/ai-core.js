@@ -386,6 +386,12 @@ export function langCode(lang) {
   return /^[a-z]{2,3}$/.test(l) ? l : '';
 }
 
+/**
+ * A tab whose page isn't in memory, so there is no text to read: put to sleep (discarded or frozen),
+ * or restored by Chrome after a restart and not loaded until you open it (status "unloaded").
+ */
+export const notLoaded = t => !!t && (t.discarded || t.frozen || t.status === 'unloaded');
+
 /** URLs Chrome never lets extensions read. */
 export function isReadableUrl(url) {
   if (!/^(https?|file):/i.test(url || '')) return false;

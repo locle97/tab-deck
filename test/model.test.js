@@ -162,10 +162,10 @@ test('cardTabs shows the first tabs and counts the rest, but never hides just on
 
 test('groupFacts counts tabs, distinct sites, sleeping and playing tabs', () => {
   const ts = [
-    tab(1, 'https://www.a.com/1'), tab(2, 'https://a.com/2', { discarded: true }),
+    tab(1, 'https://www.a.com/1'), tab(2, 'https://a.com/2', { discarded: true }), tab(9, 'https://a.com/9', { status: 'unloaded' }),
     tab(3, 'https://b.com', { audible: true }), tab(4, 'chrome://newtab'),
   ];
-  assert.equal(groupFacts(ts), '4 tabs · 3 sites · 1 sleeping · 1 playing');
+  assert.equal(groupFacts(ts), '5 tabs · 3 sites · 2 sleeping · 1 playing');
   assert.equal(groupFacts([tab(1, 'https://a.com')]), '1 tab · 1 site');
 });
 

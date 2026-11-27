@@ -287,7 +287,7 @@ function tabRow(t, counts) {
   if (t.active) badges.push('<span class="badge active" title="The visible tab in its window">Active</span>');
   if (t.audible) badges.push('<span class="badge audio">Playing</span>');
   if (counts.get(t.url) > 1) badges.push('<span class="badge dup">Duplicate</span>');
-  if (t.discarded || t.frozen) badges.push('<span class="badge sleep" title="Unloaded to save memory. It reloads when you open it.">Sleeping</span>');
+  if (t.discarded || t.frozen || t.status === 'unloaded') badges.push('<span class="badge sleep" title="Unloaded to save memory. It reloads when you open it.">Sleeping</span>');
   const url = t.url || t.pendingUrl || '';
   const u = shortUrl(url);
   const d = siteName(url);
@@ -329,7 +329,7 @@ function renderMain() {
   if (view.kind === 'group' && groupById(view.id)) {
     const g = groupById(view.id);
     const sites = new Set(g.tabs.map(t => hostOf(t.url))).size;
-    const sleeping = g.tabs.filter(t => t.discarded || t.frozen).length;
+    const sleeping = g.tabs.filter(t => t.discarded || t.frozen || t.status === 'unloaded').length;
     h += `<div class="pane-head" style="--c:${cvar(g.color)}">
       <div class="pane-title">
         <div class="eyebrow"><span class="bar"></span>${COLOR_NAMES[g.color]} group${model.windowCount > 1 ? ` · window ${g.window}` : ''}${g.collapsed ? ' · collapsed' : ''}</div>
@@ -421,7 +421,7 @@ function onAiPainted() { if (view.kind === 'dashboard' && !renaming && !drag && 
 
 function cardTab(t) {
   const url = t.url || t.pendingUrl || '';
-  const sleeping = t.discarded || t.frozen;
+  const sleeping = t.discarded || t.frozen || t.status === 'unloaded';
   const site = siteName(url);
   const tip = `${titleOf(t)}\n${shortUrl(url)}${sleeping ? '\nSleeping: reloads when you open it' : ''}`;
   return `<li class="card-tab${t.active ? ' is-active' : ''}${sleeping ? ' is-sleeping' : ''}" data-id="${t.id}" data-dtab="${t.id}" draggable="true">

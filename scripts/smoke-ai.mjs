@@ -422,6 +422,29 @@ try {
   assert.equal(await page.locator('.ai-sum.is-stale').count(), 0, 'no tab shows Outdated');
   step('a page open in two groups keeps one summary; summarizing either group doesn\'t rewrite it');
 
+  // A tab Chrome hasn't loaded (asleep, or restored after a restart and not opened yet) has no text.
+  // It must not be summarized from its title ("page text unreadable"): Summarize loads it, reads it and
+  // puts it back to sleep.
+  const sleepyUrl = U('/sleepy');
+  await page.evaluate(async url => {
+    const [other] = await chrome.tabs.query({ url: url.replace('/sleepy', '/other') });
+    const t = await chrome.tabs.create({ url, active: false });
+    await new Promise(r => { const f = (id, i) => { if (id === t.id && i.status === 'complete') { chrome.tabs.onUpdated.removeListener(f); r(); } }; chrome.tabs.onUpdated.addListener(f); });
+    await chrome.tabs.group({ tabIds: [t.id], groupId: other.groupId });
+    await chrome.tabs.discard(t.id);
+  }, sleepyUrl);
+  const sleepyLine = () => page.locator('.card-tab:has-text("/sleepy") .ai-line');
+  await page.waitForFunction(() => /Not loaded yet/.test(document.querySelector('.card-tab.is-sleeping .ai-line')?.textContent || ''));
+  if (SHOTS) await card('Other').screenshot({ path: join(SHOTS, 'unloaded-before.png') });
+  await card('Other').locator('.card-head [data-act=ai-group]').click();
+  await page.waitForFunction(() => /purple-otter/.test([...document.querySelectorAll('.card-tab')].find(e => /\/sleepy/.test(e.textContent))?.querySelector('.ai-line')?.textContent || ''), null, { timeout: 30000 });
+  assert.match(await sleepyLine().textContent(), /mentions purple-otter/, 'the summary is from the page text, not the title');
+  const sleepyIns = await page.evaluate(async u => (await chrome.storage.local.get('aiTabInsights')).aiTabInsights[u], sleepyUrl);
+  assert.equal(sleepyIns.readable, true);
+  await page.waitForFunction(async u => (await chrome.tabs.query({ url: u }))[0]?.discarded, sleepyUrl);
+  if (SHOTS) await card('Other').screenshot({ path: join(SHOTS, 'unloaded-after.png') });
+  step('Summarize loads a tab Chrome hasn’t loaded, summarizes its page text, and puts it back to sleep');
+
   // The side panel shows the same statuses, read from storage, and picks up changes made in the page.
   const panel = await ctx.newPage();
   await panel.setViewportSize({ width: 380, height: 700 });
