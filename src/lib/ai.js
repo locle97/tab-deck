@@ -9,7 +9,7 @@ import {
   baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   cacheKey, fnv, pruneCache, mergeRemote, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
   insightKey, groupKey, normalizeStatus, migrateInsightStatuses, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION, contentSig,
-  sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES,
+  sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES, previousBlock, tabUserText,
   CLOUDS, cloudModel, cloudConsent, consentKey, claudeRequest, claudeHeaders, parseClaudeSse, claudeError,
 } from './ai-core.js';
 import { fieldPlanFor, decideStatus, foundAny, factsLine, fieldsBlock } from './fields.js';
@@ -441,13 +441,13 @@ export async function clearPromptLog() {
   await chrome.storage.local.remove(LOG_KEY);
 }
 
-async function localInsight(page, instructions, { api, signal, onProgress }) {
+async function localInsight(page, instructions, { api, signal, onProgress, previous = '' }) {
   const text = page.text ? headTail(page.text, 6000) : '';
   if (api === 'prompt') {
     const base = await getBaseSession(onProgress);
     const s = await base.clone({ signal });
     try {
-      const user = `${tabInstructionBlock(instructions)}\n\nTitle: ${page.title}\nURL: ${page.url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
+      const user = `${tabInstructionBlock(instructions)}\n\n${tabUserText({ title: page.title, url: page.url, text, previous })}`;
       const out = await logged({ kind: 'tab', engine: 'local', api: 'prompt', title: page.title, url: page.url, system: baseTabPrompt(localOut()), user },
         () => s.prompt(user, { responseConstraint: INSIGHT_SCHEMA, signal }));
       return parseInsight(out);
@@ -671,20 +671,22 @@ export async function summarizeTab(tab, opts = {}) {
   // reuse: the page is open in several groups; keep its summary while the page is the same, even if this
   // group's instructions differ from those it was written with.
   if (!opts.force && opts.reuse && prev?.summary && sameContent) return putInsight(page.url, { stale: undefined }, { written: false });
+  // The last status and summary, so the model sees where the tab stood and keeps or changes it on purpose.
+  const previous = previousBlock(prev);
   let r;
   if (fieldInfo?.status) {
-    r = await fieldSentence(page, fieldInfo, instructions, engine, st, opts);
+    r = await fieldSentence(page, fieldInfo, instructions, engine, st, { ...opts, previous });
     r.status = fieldInfo.status;
     r.facts = fieldInfo.facts;
   } else {
     // No status from the fields: the AI decides as before, with the fields it could read put first.
     const ai = fieldInfo ? { ...page, text: `Page fields (read from the page by code, trust these):\n${fieldsBlock(plan.fields, fieldInfo.values)}\n\n${page.text}` } : page;
     if (engine === 'cloud') {
-      const { system, user } = tabPrompt({ ...ai, instructions, lang: uiLang() });
+      const { system, user } = tabPrompt({ ...ai, instructions, previous, lang: uiLang() });
       r = parseInsight(await logged({ kind: 'tab', engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), title: page.title, url: page.url, system, user },
         () => streamCloud(st.settings, { system, user, json: true, signal: opts.signal })));
     } else {
-      r = await localInsight(ai, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress });
+      r = await localInsight(ai, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress, previous });
     }
   }
   if (!r.summary) throw new AiError('The AI returned an empty summary.', 'empty');
@@ -709,12 +711,12 @@ async function fieldSentence(page, info, instructions, engine, st, opts) {
   const meta = { kind: 'tab', title: page.title, url: page.url, fields: info.values, status, statusFrom: 'fields' };
   try {
     if (engine === 'cloud') {
-      const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, lang: uiLang(), max: 3000 });
+      const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, previous: opts.previous, lang: uiLang(), max: 3000 });
       return parseInsight(await logged({ ...meta, engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), system, user },
         () => streamCloud(st.settings, { system, user, json: 'sentence', signal: opts.signal })));
     }
     if (engine === 'local' && st.localApi === 'prompt') {
-      const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, lang: localOut() });
+      const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, previous: opts.previous, lang: localOut() });
       const s = await self.LanguageModel.create({ ...lmIO(), initialPrompts: [{ role: 'system', content: system }],
         monitor(m) { m.addEventListener('downloadprogress', e => opts.onProgress?.(e.total ? e.loaded / e.total : e.loaded)); } }).catch(e => { throw gestureError(e); });
       try {

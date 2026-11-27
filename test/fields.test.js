@@ -170,6 +170,8 @@ test('sentence prompt: facts and status are given, the AI only writes the senten
   assert.match(system, /says why the tab is "Need action"/);
   assert.equal(templateSentence({ title: 'Fix it', facts: 'state: Open' }), 'state: Open · Fix it');
   assert.equal(templateSentence({ title: 'Fix it', facts: '' }), 'Fix it');
+  const withPrev = sentencePrompt({ title: 'Fix it', url: 'u', facts: 'state: Merged', status: 'idle', previous: 'Previous analysis of this tab:\nStatus: Need action' }).user;
+  assert.match(withPrev, /^Previous analysis[\s\S]*Context only[\s\S]*Status: Idle/);
   const req = geminiRequest({ model: 'm', system, user, json: 'sentence' });
   assert.deepEqual(req.body.generationConfig.responseSchema.required, ['summary']);
 });

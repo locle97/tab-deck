@@ -5,7 +5,7 @@ import {
   tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, cacheKey, pruneCache, renderSummary,
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
   effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, staleCheck, addMark, nextRefreshAt, stableTitle, stableText, contentSig, REFRESH, EVERY_DEFAULT, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
-  pickInstructions, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
+  pickInstructions, previousBlock, tabUserText, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   mergeRemote, migrateInsightStatuses,
 } from '../src/lib/ai-core.js';
 
@@ -379,4 +379,24 @@ test('migrateInsightStatuses rewrites saved Done and Waiting statuses, AI-set an
   assert.deepEqual(map.a, { status: 'idle', manual: 'working' });
   assert.deepEqual(map.b, { status: 'action' });
   assert.equal(migrateInsightStatuses(map), false);
+});
+
+test('the previous status and summary go into the tab prompt as context', () => {
+  const now = Date.parse('2026-11-27T10:00:00Z');
+  const prev = { status: 'action', summary: 'Needs you to create the D1 database.', at: now - 3 * 3600e3 };
+  const b = previousBlock(prev, now);
+  assert.match(b, /^Previous analysis of this tab \(written 3 h ago; the page may have changed since\):/);
+  assert.match(b, /Status: Need action\nSummary: Needs you to create the D1 database\./);
+  assert.doesNotMatch(b, /by hand/);
+  assert.match(previousBlock({ ...prev, manual: 'idle' }, now), /set the status to Idle by hand/);
+  assert.match(previousBlock({ status: 'done', summary: 'x', at: now - 60e3 }, now), /1 min ago[\s\S]*Status: Idle/);
+  assert.equal(previousBlock(null), '');
+  assert.equal(previousBlock({ status: 'nope', summary: '  ' }), '');
+  const p = tabPrompt({ title: 'T', url: 'u', text: 'body', previous: b });
+  assert.ok(p.user.startsWith(b + '\n\nTitle: T'));
+  assert.ok(p.user.indexOf('Previous analysis') < p.user.indexOf('<page>'), 'previous analysis sits outside the untrusted page block');
+  assert.match(p.system, /keep its status while the page still supports it/);
+  assert.match(p.system, /The page always wins/);
+  assert.ok(!tabPrompt({ title: 'T', url: 'u', text: 'body' }).user.includes('Previous analysis'));
+  assert.equal(tabUserText({ title: 'T', url: 'u', text: '' }), 'Title: T\nURL: u\n<page>\n(The page text could not be read. Work from the title and URL only.)\n</page>');
 });

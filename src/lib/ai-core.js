@@ -438,6 +438,35 @@ Status:
 A merged or closed pull request is Idle; one waiting on your review or changes is Need action; one waiting on others' review or CI is Working. An AI chat or agent that is still answering is Working, one that asks you a question is Need action, and one that has finished its answer is Idle.
 Summary: the concrete fact that explains the status, in a few words: the exact thing you must do, what is still running, what finished, or for Reference what it is useful for.`;
 
+/** "5 min", "3 h", "2 days": how long ago a previous analysis was written. */
+function ageText(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 60) return `${Math.max(1, m)} min`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h} h` : `${Math.round(h / 24)} days`;
+}
+
+/**
+ * The tab's previous status and summary, given to the model as context so statuses stay consistent
+ * from one run to the next. The page still decides: the model keeps the status or changes it.
+ * prev: a saved insight ({summary, status, manual, at}). Empty when there is nothing useful.
+ */
+export function previousBlock(prev, now = Date.now()) {
+  const status = normalizeStatus(prev?.status);
+  const manual = normalizeStatus(prev?.manual);
+  const summary = String(prev?.summary || '').replace(/\s+/g, ' ').trim();
+  if (!status && !manual && !summary) return '';
+  const age = prev?.at ? ` ${ageText(now - prev.at)} ago` : '';
+  const lines = [`Previous analysis of this tab (written${age}; the page may have changed since):`];
+  if (status) lines.push(`Status: ${STATUSES[status].label}`);
+  if (summary) lines.push(`Summary: ${summary}`);
+  if (manual && manual !== status) lines.push(`The person then set the status to ${STATUSES[manual].label} by hand.`);
+  return lines.join('\n');
+}
+
+const PREVIOUS_RULE = `If a previous analysis is given, use it as context: keep its status while the page still supports it, ` +
+  `change it when the page shows the state moved on (for example a merge, a new question, a finished run). The page always wins over the previous analysis.`;
+
 /** The fixed part of every tab prompt: the reply format. Detailed instructions go after it. */
 export function baseTabPrompt(lang = 'en') {
   return `You look at one browser tab for someone keeping track of many open tabs. ` +
@@ -446,6 +475,7 @@ export function baseTabPrompt(lang = 'en') {
     `"status": one of the values below. It must agree with "facts".\n${STATUS_GUIDE}\n"unknown": none of these is clear.\n` +
     `"summary": why the tab has that status, in ONE short sentence (at most ${SUMMARY_WORDS} words). ${WHY_RULE} ` +
     `No preamble, no Markdown. It must agree with "facts" and "status".\n` +
+    `${PREVIOUS_RULE}\n` +
     `Follow the instructions for this page on what to put in each field. ` +
     `Write "facts" and "summary" in the language with code "${lang}" unless those instructions ask otherwise. ${INJECTION_GUARD}`;
 }
@@ -455,10 +485,14 @@ export function tabInstructionBlock(instructions) {
   return `Instructions for this page:\n${String(instructions || '').trim() || DEFAULT_TAB_INSTRUCTIONS}`;
 }
 
-export function tabPrompt({ title, url, text, instructions, lang = 'en' }) {
+/** The user turn of a tab prompt: the previous analysis (if any), then the page. Shared by every engine. */
+export function tabUserText({ title, url, text, previous = '' }) {
+  return `${previous ? `${previous}\n\n` : ''}Title: ${title}\nURL: ${url}\n<page>\n${text || '(The page text could not be read. Work from the title and URL only.)'}\n</page>`;
+}
+
+export function tabPrompt({ title, url, text, instructions, previous = '', lang = 'en' }) {
   const system = `${baseTabPrompt(lang)}\n\n${tabInstructionBlock(instructions)}`;
-  const body = text ? clip(text, 60000) : '(The page text could not be read. Work from the title and URL only.)';
-  const user = `Title: ${title}\nURL: ${url}\n<page>\n${body}\n</page>`;
+  const user = tabUserText({ title, url, text: text ? clip(text, 60000) : '', previous });
   return { system, user };
 }
 
@@ -470,7 +504,7 @@ export const SENTENCE_SCHEMA = { type: 'object', properties: { summary: { type: 
  * When status rules already decided the status from the page's fields, the AI only writes the sentence.
  * It gets the facts, the status and a short excerpt, not the whole page, and is told not to judge the status.
  */
-export function sentencePrompt({ title, url, facts, status, excerpt = '', instructions = '', lang = 'en', max = 1500 }) {
+export function sentencePrompt({ title, url, facts, status, excerpt = '', instructions = '', previous = '', lang = 'en', max = 1500 }) {
   const label = STATUSES[status]?.label || status;
   const system = `You write ONE short sentence (at most ${SUMMARY_WORDS} words) about one browser tab for someone keeping track of many open tabs. ` +
     `The page's state and status were read from the page by code and are correct: use them, never contradict them, and don't judge the status yourself. ` +
@@ -478,7 +512,7 @@ export function sentencePrompt({ title, url, facts, status, excerpt = '', instru
     `Write in the language with code "${lang}" unless the user's instructions ask otherwise. ${INJECTION_GUARD}` +
     (instructions ? `\n\nThe user's instructions for this page (use what they say about the summary; the status is already decided):\n${instructions}` : '');
   const body = excerpt ? headTail(excerpt, max) : '';
-  const user = `Title: ${title}\nURL: ${url}\nState: ${facts || '(none)'}\nStatus: ${label}\n<page>\n${body || '(no excerpt)'}\n</page>`;
+  const user = `${previous ? `${previous}\n(Context only: the status above is the one decided now.)\n\n` : ''}Title: ${title}\nURL: ${url}\nState: ${facts || '(none)'}\nStatus: ${label}\n<page>\n${body || '(no excerpt)'}\n</page>`;
   return { system, user };
 }
 
