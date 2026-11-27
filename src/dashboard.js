@@ -324,7 +324,7 @@ function urlCounts() {
 function renderMain() {
   if (PANEL && view.kind !== 'dashboard') view = { kind: 'dashboard' }; // e.g. after a restore or a move
   const counts = urlCounts();
-  if (view.kind === 'dashboard') { $('#main').innerHTML = renderDashboard(); return; }
+  if (view.kind === 'dashboard') { $('#main').innerHTML = renderDashboard(); packCards(); return; }
   let h = '<div class="pane">';
   if (view.kind === 'group' && groupById(view.id)) {
     const g = groupById(view.id);
@@ -545,6 +545,29 @@ function renderDashboard() {
   }
   if (!PANEL) h += `<div class="hint-row"><span>Click a tab to switch to it</span><span>Click a group name for details</span><span><kbd>Alt 0</kbd> dashboard</span></div>`;
   return h + '</div>';
+}
+
+/* ---------- masonry: cards pack up under the card above them ---------- */
+// The grid has tiny rows and no row gap; each card spans as many rows as its height (plus the gap)
+// needs. Grid placement then drops every card into the first column with room, so a short card
+// leaves no hole above the next row's card. DOM order stays the group order, which keyboard focus
+// and drag and drop rely on. A ResizeObserver re-spans a card whenever its height changes (a
+// summary arrives, "show all" opens, the panel is resized).
+const PACK_ROW = 2; // px, matches grid-auto-rows in .cards.packed
+const cardSizer = new ResizeObserver(entries => entries.forEach(en => spanCard(en.target)));
+function spanCard(card) {
+  const grid = card.parentElement;
+  if (!grid?.classList.contains('cards')) return;
+  const gap = parseFloat(getComputedStyle(grid).getPropertyValue('--card-gap')) || 0;
+  card.style.gridRowEnd = `span ${Math.max(1, Math.ceil((card.getBoundingClientRect().height + gap) / PACK_ROW))}`;
+}
+function packCards() {
+  cardSizer.disconnect();
+  const grid = $('.cards');
+  if (!grid) return;
+  // Measure at natural height first, then switch to the packed grid in the same frame (no flash).
+  grid.querySelectorAll(':scope > .card').forEach(c => { spanCard(c); cardSizer.observe(c); });
+  grid.classList.add('packed');
 }
 
 function sortMenu(anchor) {
