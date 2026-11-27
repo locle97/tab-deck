@@ -2,6 +2,7 @@
 
 export const ON_DEVICE_LANGS = ['en', 'es', 'ja', 'de', 'fr'];
 export const DEFAULT_MODEL = 'gemini-flash-latest';
+export const DEFAULT_CLAUDE_MODEL = 'claude-haiku-5-5';
 export const MAX_GROUP_TABS = 20;
 export const MAX_LOCAL_GROUP_TABS = 12;
 export const MAX_INSTRUCTIONS = 2000;
@@ -9,13 +10,16 @@ export const MAX_INSTRUCTIONS = 2000;
 export const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
   engine: 'auto',          // 'auto' | 'local' | 'cloud'
+  cloud: 'gemini',         // which cloud API the 'cloud' engine uses: 'gemini' | 'claude'
   auto: 'local',           // summarize tabs automatically: 'off' | 'local' (on-device only) | 'all'
   tabLines: false,         // show each tab's summary as a line under its title (otherwise only in the status tooltip)
-  model: DEFAULT_MODEL,
+  model: DEFAULT_MODEL,      // Gemini model
+  claudeModel: DEFAULT_CLAUDE_MODEL,
   general: '',             // instructions for every summary
   groups: {},              // { [normalized group name]: instructions }
   rules: [],               // [{ pattern, instructions }] for pages whose URL matches
-  cloudConsentAt: 0,
+  cloudConsentAt: 0,        // agreed to send page content to Gemini
+  claudeConsentAt: 0,       // agreed to send page content to Anthropic
   pageAccessDeclined: false,
   presets: true,           // use the built-in page fields and status rules (GitHub) where no rule of yours has fields
 });
@@ -24,6 +28,9 @@ export function normalizeSettings(s) {
   const out = { ...DEFAULT_SETTINGS, ...(s && typeof s === 'object' ? s : {}) };
   if (!['auto', 'local', 'cloud'].includes(out.engine)) out.engine = 'auto';
   if (!['off', 'local', 'all'].includes(out.auto)) out.auto = 'local';
+  if (!Object.hasOwn(CLOUDS, out.cloud)) out.cloud = 'gemini';
+  if (typeof out.claudeModel !== 'string' || !out.claudeModel.trim()) out.claudeModel = DEFAULT_CLAUDE_MODEL;
+  out.claudeModel = out.claudeModel.trim();
   delete out.length;
   out.tabLines = out.tabLines === true;
   out.presets = out.presets !== false;
@@ -55,6 +62,20 @@ export function normalizeSettings(s) {
 }
 
 export const MAX_RULES = 50;
+
+/* ---------- cloud providers ---------- */
+
+/** The cloud APIs the 'cloud' engine can use, each with the user's own key. */
+export const CLOUDS = Object.freeze({
+  gemini: { name: 'Gemini', company: 'Google', api: 'Gemini API', badge: 'Gemini · cloud' },
+  claude: { name: 'Claude', company: 'Anthropic', api: 'Claude API', badge: 'Claude · cloud' },
+});
+/** The cloud a saved insight came from. Insights saved before there was a choice came from Gemini. */
+export const cloudOf = ins => (Object.hasOwn(CLOUDS, ins?.cloud ?? '') ? ins.cloud : 'gemini');
+export const cloudModel = settings => (settings.cloud === 'claude' ? settings.claudeModel : settings.model);
+export const consentKey = cloud => (cloud === 'claude' ? 'claudeConsentAt' : 'cloudConsentAt');
+/** When the user agreed to send page content to the selected cloud (0 if never). */
+export const cloudConsent = settings => settings[consentKey(settings.cloud)] || 0;
 
 const clip = (s, n) => (s.length > n ? s.slice(0, n) : s);
 
@@ -497,6 +518,84 @@ export function geminiError(status, body) {
   if (status === 429) return { code: 'rate', message: 'Gemini rate limit reached. Try again in a moment.', retry };
   if (status >= 500) return { code: 'server', message: 'Gemini had a problem. Try again in a moment.' };
   return { code: 'other', message: msg ? `Gemini: ${msg}` : `Gemini request failed (${status}).` };
+}
+
+/* ---------- Claude API (Anthropic) ---------- */
+
+export const CLAUDE_URL = 'https://api.anthropic.com/v1/messages';
+export const CLAUDE_VERSION = '2026-10-21';
+
+/** Headers for a call from the browser with the user's own key. */
+export function claudeHeaders(key) {
+  return {
+    'content-type': 'application/json',
+    'x-api-key': key,
+    'anthropic-version': CLAUDE_VERSION,
+    // Anthropic refuses browser calls without this; the key is the user's own, kept on their device.
+    'anthropic-dangerous-direct-browser-access': 'true',
+  };
+}
+
+// Structured outputs need every object closed with additionalProperties: false.
+const closed = schema => ({ ...schema, additionalProperties: false });
+
+/**
+ * A streaming Messages API request. json: true asks for {facts, summary, status}, 'sentence' for {summary}.
+ * Short, simple answers: thinking off and low effort keep them fast and cheap.
+ */
+export function claudeRequest({ model, system, user, json = false }) {
+  const output = { effort: 'low' };
+  if (json === 'sentence') output.format = { type: 'json_schema', schema: closed(SENTENCE_SCHEMA) };
+  else if (json) output.format = { type: 'json_schema', schema: closed(INSIGHT_SCHEMA) };
+  return {
+    url: CLAUDE_URL,
+    body: {
+      model,
+      max_tokens: 1024,
+      stream: true,
+      system,
+      messages: [{ role: 'user', content: user }],
+      thinking: { type: 'disabled' },
+      output_config: output,
+    },
+  };
+}
+
+/** Feed Claude SSE text in; returns {texts, rest, blocked, error}. Keep `rest` for the next call. */
+export function parseClaudeSse(buffer) {
+  const texts = [];
+  let blocked = null, error = null;
+  const lines = buffer.split('\n');
+  const rest = lines.pop();
+  for (const line of lines) {
+    const m = /^data:\s?(.*)$/.exec(line.trim());
+    if (!m || !m[1]) continue;
+    let j;
+    try { j = JSON.parse(m[1]); } catch { continue; }
+    if (j.type === 'content_block_delta' && j.delta?.type === 'text_delta' && j.delta.text) texts.push(j.delta.text);
+    else if (j.type === 'message_delta' && j.delta?.stop_reason === 'refusal') blocked = 'refusal';
+    else if (j.type === 'error') error = { type: j.error?.type || 'error', message: j.error?.message || '' };
+  }
+  return { texts, rest, blocked, error };
+}
+
+/** Turn a failed Claude API response into a short message for people. retryAfter: the retry-after header. */
+export function claudeError(status, body, retryAfter) {
+  let msg = '', type = '';
+  try {
+    const j = typeof body === 'string' ? JSON.parse(body) : body;
+    msg = j?.error?.message || '';
+    type = j?.error?.type || '';
+  } catch {}
+  const retry = parseFloat(retryAfter) || 0;
+  if (status === 401 || type === 'authentication_error') return { code: 'key', message: 'Your Claude API key was rejected. Check it in Settings.' };
+  if (status === 403 || type === 'permission_error') return { code: 'key', message: 'Your Claude API key can’t use this model. Check it in Settings.' };
+  if (status === 404 || type === 'not_found_error') return { code: 'model', message: 'Claude doesn’t know that model name. Check the model in Settings.' };
+  if (status === 429 || type === 'rate_limit_error') return { code: 'rate', message: 'Claude rate limit reached. Try again in a moment.', retry };
+  if (status === 529 || type === 'overloaded_error') return { code: 'server', message: 'Claude is busy right now. Try again in a moment.', retry };
+  if (status >= 500) return { code: 'server', message: 'Claude had a problem. Try again in a moment.' };
+  if (status === 400 && /credit balance/i.test(msg)) return { code: 'key', message: 'Your Anthropic account is out of credit. Add credit in the Claude Console.' };
+  return { code: 'other', message: msg ? `Claude: ${msg}` : `Claude request failed (${status}).` };
 }
 
 /* ---------- cache ---------- */

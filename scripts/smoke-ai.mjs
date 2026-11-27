@@ -1,6 +1,6 @@
 // End-to-end smoke test for AI summaries. Loads the extension in Chromium with Playwright.
-// Headless Chromium has no on-device model and we don't want real Gemini calls, so the page gets
-// fake `LanguageModel` / `Summarizer` globals and a fake Gemini endpoint. Everything else
+// Headless Chromium has no on-device model and we don't want real Gemini or Claude calls, so the page gets
+// fake `LanguageModel` / `Summarizer` globals and fake Gemini and Claude endpoints. Everything else
 // (permissions, page reading, saved summaries, statuses, rules, settings, the UI) is the real code.
 // Run with: npm run smoke:ai
 
@@ -75,6 +75,20 @@ function fakes() {
         ? ev('{"summary": "A cloud tab sentence from Gemini. Extra.", ') + ev('"status": "waiting"}')
         : ev('This group is about **cloud** testing. ') + ev('Extra sentence.');
       return new Response(out, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    if (String(url).startsWith('https://api.anthropic.com/')) {
+      const body = init.body ? JSON.parse(init.body) : null;
+      ai.fetches.push({ url: String(url), headers: init.headers, body });
+      if (init.headers?.['x-api-key'] === 'bad') return new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }), { status: 401 });
+      if (String(url).includes('/v1/models')) return new Response('{"data":[]}', { status: 200 });
+      const ev = t => `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: t } })}\n\n`;
+      const end = 'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n';
+      const fmt = body.output_config?.format;
+      const out = fmt && fmt.schema.required.includes('status')
+        ? ev('{"facts": "", "summary": "A cloud tab sentence from Claude. Extra.", ') + ev('"status": "done"}')
+        : fmt ? ev('{"summary": "A field sentence from Claude."}')
+        : ev('This group is about **Claude** testing. ') + ev('Extra sentence.');
+      return new Response(out + end, { status: 200, headers: { 'content-type': 'text/event-stream' } });
     }
     return realFetch(url, init);
   };
@@ -315,11 +329,12 @@ try {
   await page.waitForSelector('[role=tab][data-tab=instructions][aria-selected=true]');
   await page.focus('[role=tab][data-tab=instructions]');
   await page.keyboard.press('ArrowUp');
-  await page.waitForSelector('#aiKey', { state: 'visible' });
-  await page.fill('#aiKey', 'bad');
-  await page.click('#aiKeyTest');
-  await page.waitForSelector('#aiKeyMsg .ai-bad');
-  await page.fill('#aiKey', 'good-key');
+  await page.waitForSelector('#aiKey-gemini', { state: 'visible' });
+  assert.equal(await page.isVisible('#aiKey-claude'), false, 'only the chosen cloud’s key is shown');
+  await page.fill('#aiKey-gemini', 'bad');
+  await page.click('[data-cloud=gemini] [data-keytest]');
+  await page.waitForSelector('[data-cloud=gemini] .ai-key-msg .ai-bad');
+  await page.fill('#aiKey-gemini', 'good-key');
   await page.click('[data-m=ok]');
   await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
   await page.click('.card:has-text("Research") [data-act=card-more]');
@@ -349,6 +364,51 @@ try {
   assert.match(f.body.systemInstruction.parts[0].text, /^You look at one browser tab[\s\S]*in this order: \{"facts"[\s\S]*Instructions for this page:\nPR rule/);
   step('Gemini for tabs returns one sentence and a status as JSON, with the URL rule');
 
+  // Claude Haiku as the cloud: its own key, its own consent, same summaries and statuses.
+  await page.click('#settingsBtn');
+  await page.check('input[name=aiCloud][value=claude]');
+  await page.waitForSelector('#aiKey-claude', { state: 'visible' });
+  assert.equal(await page.isVisible('#aiKey-gemini'), false);
+  assert.equal(await page.inputValue('#aiModel-claude'), 'claude-haiku-5-5');
+  await page.fill('#aiKey-claude', 'bad');
+  await page.click('[data-cloud=claude] [data-keytest]');
+  await page.waitForFunction(() => /Claude API key was rejected/.test(document.querySelector('[data-cloud=claude] .ai-key-msg')?.textContent || ''));
+  await page.fill('#aiKey-claude', 'claude-key');
+  if (SHOTS) { await page.locator('#aiKey-claude').scrollIntoViewIfNeeded(); await page.screenshot({ path: join(SHOTS, 'ai-settings-claude.png') }); }
+  await page.click('[data-m=ok]');
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
+  const keys = await page.evaluate(() => chrome.storage.local.get(['aiGeminiKey', 'aiClaudeKey']));
+  assert.deepEqual(keys, { aiGeminiKey: 'good-key', aiClaudeKey: 'claude-key' }, 'each cloud keeps its own key');
+  await page.hover('.tab:has-text("/alpha")');
+  await page.click('.tab:has-text("/alpha") [data-act=ai-tab]');
+  await page.waitForSelector('#modal:not([hidden]) :text("Send page content to Anthropic Claude?")');
+  await page.click('[data-m=ok]');
+  await waitLine(page, '/alpha', /^A cloud tab sentence from Claude\.$/);
+  assert.match(await page.textContent('.tab:has-text("/alpha") .ai-st'), /Done/);
+  assert.match(await page.getAttribute('.tab:has-text("/alpha") .ai-sum', 'title'), /Claude · cloud/);
+  f = await page.evaluate(() => window.__ai.fetches.at(-1));
+  assert.equal(f.url, 'https://api.anthropic.com/v1/messages');
+  assert.equal(f.headers['x-api-key'], 'claude-key');
+  assert.equal(f.headers['anthropic-dangerous-direct-browser-access'], 'true');
+  assert.ok(f.headers['anthropic-version']);
+  assert.equal(f.body.model, 'claude-haiku-5-5');
+  assert.equal(f.body.stream, true);
+  assert.deepEqual(f.body.output_config.format.schema.required, ['facts', 'summary', 'status']);
+  assert.match(f.body.messages[0].content, /purple-otter/);
+  // Group sentence from Claude too, labeled as Claude.
+  await page.click('[data-act=ai-group]');
+  await page.waitForFunction(() => /^This group is about Claude testing\.$/.test(document.querySelector('[data-sum^="group:"] .ai-gtext')?.textContent || ''));
+  assert.match(await page.textContent('[data-sum^="group:"]'), /Claude · cloud/);
+  saved = (await page.evaluate(() => chrome.storage.local.get('aiSettings'))).aiSettings;
+  assert.ok(saved.claudeConsentAt > 0 && saved.cloudConsentAt > 0);
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-claude.png') });
+  step('Claude Haiku as the cloud: own key and consent, tab summary + status and group sentence from the Claude API');
+  // Back to Gemini for the rest of the test.
+  await page.click('#settingsBtn');
+  await page.check('input[name=aiCloud][value=gemini]');
+  await page.click('[data-m=ok]');
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
+
   // Rename keeps the group's instructions.
   await page.click('[data-act=rename]');
   await page.fill('#renameInput', 'Deep research');
@@ -367,15 +427,16 @@ try {
   const log = await page.evaluate(() => window.tabDeskAiLog());
   const kinds = new Set(log.map(e => `${e.kind}/${e.engine}`));
   for (const k of ['tab/local', 'group/local', 'draft/local', 'group/cloud', 'tab/cloud']) assert.ok(kinds.has(k), `log has ${k}`);
+  assert.ok(log.some(e => e.engine === 'cloud' && e.cloud === 'claude' && e.model === 'claude-haiku-5-5'), 'Claude calls are logged with their model');
   const lt = log.find(e => e.kind === 'tab' && e.engine === 'local' && /\/pr\/5/.test(e.url));
   assert.match(lt.system, /Reply with JSON only, in this order/);
   assert.match(lt.user, /^Instructions for this page:\nPR rule/);
   assert.match(lt.output, /"summary"/);
-  const ct = log.findLast(e => e.kind === 'tab' && e.engine === 'cloud');
+  const ct = log.findLast(e => e.kind === 'tab' && e.engine === 'cloud' && /\/pr\/5/.test(e.url));
   assert.match(ct.system, /Instructions for this page:\nPR rule/);
   assert.ok(ct.model);
   assert.ok(log.length <= 30);
-  assert.ok(!JSON.stringify(log).includes('good-key'), 'the API key is never logged');
+  assert.ok(!JSON.stringify(log).includes('good-key') && !JSON.stringify(log).includes('claude-key'), 'the API keys are never logged');
   const one = await page.evaluate(n => window.tabDeskAiLog(n), log.indexOf(ct));
   assert.equal(one.at, ct.at);
   await page.evaluate(() => window.tabDeskAiLog.clear());

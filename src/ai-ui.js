@@ -5,14 +5,16 @@
 
 import * as AI from './lib/ai.js';
 import {
-  groupKey, chooseEngine, DEFAULT_MODEL, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
+  groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, CLOUDS, cloudOf, cloudConsent, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
   effectiveStatus, rollupStatus, needsInsight, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
 import { parseFields, parseStatusRules, decideStatus, factsLine, PRESETS } from './lib/fields.js';
 
-const GEMINI_ORIGINS = ['https://generativelanguage.googleapis.com/*'];
-const AI_STUDIO = 'https://aistudio.google.com/apikey';
+const ORIGINS = { gemini: ['https://generativelanguage.googleapis.com/*'], claude: ['https://api.anthropic.com/*'] };
+const KEY_PAGE = { gemini: 'https://aistudio.google.com/apikey', claude: 'https://platform.claude.com/settings/keys' };
+/** Who made a saved summary, for its badge: "On-device", "Gemini · cloud", "Claude · cloud" or "No AI". */
+const engineLabel = ins => (ins.engine === 'cloud' ? CLOUDS[cloudOf(ins)].badge : ins.engine === 'none' ? 'No AI' : 'On-device');
 
 const IC = {
   spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8L12 3Z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/></svg>',
@@ -98,7 +100,7 @@ function tabLineInner(t) {
   if (tabErrors.has(t.id)) return `<span class="ai-bad">${esc(tabErrors.get(t.id))}</span>`;
   const ins = AI.tabInsight(urlOf(t));
   if (ins?.summary) {
-    const meta = `${ins.engine === 'cloud' ? 'Gemini · cloud' : ins.engine === 'none' ? 'No AI' : 'On-device'} · ${ago(ins.at)}${ins.readable === false ? ' · from the title only' : ''}${ins.facts ? `\n${ins.facts}` : ''}`;
+    const meta = `${engineLabel(ins)} · ${ago(ins.at)}${ins.readable === false ? ' · from the title only' : ''}${ins.facts ? `\n${ins.facts}` : ''}`;
     return `<span class="ai-sum" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</span>`;
   }
   if (queued.has(t.id)) return '<span class="ai-dim">Waiting to summarize…</span>';
@@ -164,7 +166,7 @@ export function summarizeAll(ids) {
   const s = state.settings;
   const engine = chooseEngine({ kind: 'group', setting: s.engine, local: state.local, hasKey: state.hasKey });
   if (!state.access && !s.pageAccessDeclined) return explainAccess(() => summarizeAll(ids));
-  if (engine === 'cloud' && !s.cloudConsentAt) return askCloudConsent('group', () => summarizeAll(ids));
+  if (engine === 'cloud' && !cloudConsent(s)) return askCloudConsent('group', () => summarizeAll(ids));
   (async () => { for (const id of ids) await runGroup(id, false); })();
 }
 /** Summarize one group and its tabs (call from a click). */
@@ -210,7 +212,7 @@ function groupLineInner(g) {
       <span class="ai-tools always"><button class="link" data-act="${fix}" type="button">${fix === 'ai-settings' ? 'Settings' : 'Try again'}</button></span></div>`;
   }
   if (!ins?.summary) return '';
-  const meta = `${ins.engine === 'cloud' ? 'Gemini · cloud' : 'On-device'} · ${ago(ins.at)}`;
+  const meta = `${engineLabel(ins)} · ${ago(ins.at)}`;
   return `<div class="ai-gline"><p class="ai-gtext" data-act="ai-expand" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</p>
     <span class="ai-tools">
       <button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${IC.refresh}</button>
@@ -232,7 +234,7 @@ function groupSumInner(g, detail) {
   } else if (ins?.summary) {
     body = `<p class="ai-gtext">${esc(ins.summary)}</p>`;
   }
-  const engine = ins && !running ? `<span class="ai-engine${ins.engine === 'cloud' ? ' cloud' : ''}">${ins.engine === 'cloud' ? 'Gemini · cloud' : 'On-device'}</span><span class="ai-when">${esc(ago(ins.at))}</span>` : '';
+  const engine = ins && !running ? `<span class="ai-engine${ins.engine === 'cloud' ? ' cloud' : ''}">${esc(engineLabel(ins))}</span><span class="ai-when">${esc(ago(ins.at))}</span>` : '';
   const tools = running
     ? '<button class="btn ghost sm" data-act="ai-stop" type="button">Stop</button>'
     : `<button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${IC.refresh}</button>
@@ -255,7 +257,7 @@ export function aiCommands(cur) {
     c.push({ type: 'cmd', label: `Summarize “${cur.name}”`, sub: 'One sentence for the group and each tab, with statuses', ico: IC.spark, run: () => start('group', cur.id) });
     c.push({ type: 'cmd', label: `AI instructions for “${cur.name}”`, sub: 'Tell the AI how to summarize this group', ico: IC.note, run: () => openGroupInstructions(cur) });
   }
-  c.push({ type: 'cmd', label: 'Settings', sub: 'AI engine, Gemini API key, summary instructions', ico: IC.gear, run: () => openAiSettings() });
+  c.push({ type: 'cmd', label: 'Settings', sub: 'AI engine, Gemini or Claude API key, summary instructions', ico: IC.gear, run: () => openAiSettings() });
   return c;
 }
 
@@ -329,7 +331,7 @@ function start(kind, id, { force = false } = {}) {
   const s = state.settings;
   const engine = chooseEngine({ kind, setting: s.engine, local: state.local, hasKey: state.hasKey });
   if (!state.access && !s.pageAccessDeclined) return explainAccess(() => start(kind, id, { force }));
-  if (engine === 'cloud' && !s.cloudConsentAt) return askCloudConsent(kind, () => start(kind, id, { force }));
+  if (engine === 'cloud' && !cloudConsent(s)) return askCloudConsent(kind, () => start(kind, id, { force }));
   if (kind === 'tab') {
     tabErrors.delete(id);
     enqueue(id, true, true);
@@ -425,7 +427,7 @@ export function noticeTabs(items) {
   const engine = chooseEngine({ kind: 'tab', setting: s.engine, local: state.local, hasKey: state.hasKey });
   if (!engine) return;
   if (engine === 'local' && state.local !== 'available') return;
-  if (engine === 'cloud' && (s.auto !== 'all' || !s.cloudConsentAt)) return;
+  if (engine === 'cloud' && (s.auto !== 'all' || !cloudConsent(s))) return;
   for (const { t } of items) {
     const url = urlOf(t);
     if (t.status !== 'complete' || t.discarded || t.frozen || t.incognito || !isReadableUrl(url)) continue;
@@ -508,11 +510,16 @@ function explainAccess(then) {
 
 function askCloudConsent(kind, then) {
   const localOk = state.local !== 'unavailable';
-  ctx.openModal(`<div class="dialog-head"><h2>Send page content to Google Gemini?</h2>
-      <p>${kind === 'group' ? 'For a group summary, the text of the readable tabs in the group' : 'The text of this page'} will be sent to Google’s Gemini API using your API key.</p></div>
-    <div class="dialog-body ai-muted"><p>Google handles it under the Gemini API terms for your key. On the free tier, Google may use what you send to improve its products. Tab Desk has no server of its own and never sees your data.</p>
-      <p>Summaries made by Gemini are marked <span class="ai-engine cloud">Gemini · cloud</span>. You’ll only be asked once; you can turn the cloud off any time in Settings.</p></div>
-    <div class="dialog-foot">${localOk ? '<button class="btn" data-m="local" type="button">Use on-device instead</button>' : ''}<button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Send to Gemini</button></div>`,
+  const cloud = state.settings.cloud;
+  const c = CLOUDS[cloud];
+  const terms = cloud === 'claude'
+    ? 'Anthropic handles it under the terms of the Anthropic account your key belongs to.'
+    : 'Google handles it under the Gemini API terms for your key. On the free tier, Google may use what you send to improve its products.';
+  ctx.openModal(`<div class="dialog-head"><h2>Send page content to ${c.company} ${c.name}?</h2>
+      <p>${kind === 'group' ? 'For a group summary, the text of the readable tabs in the group' : 'The text of this page'} will be sent to ${c.company}’s ${c.api} using your API key.</p></div>
+    <div class="dialog-body ai-muted"><p>${terms} Tab Desk has no server of its own and never sees your data.</p>
+      <p>Summaries made by ${c.name} are marked <span class="ai-engine cloud">${c.badge}</span>. You’ll only be asked once; you can turn the cloud off any time in Settings.</p></div>
+    <div class="dialog-foot">${localOk ? '<button class="btn" data-m="local" type="button">Use on-device instead</button>' : ''}<button class="btn" data-m="cancel" type="button">Cancel</button><button class="btn primary" data-m="ok" type="button">Send to ${c.name}</button></div>`,
   box => {
     box.querySelector('[data-m=cancel]').onclick = ctx.closeModal;
     box.querySelector('[data-m=local]')?.addEventListener('click', async () => {
@@ -523,7 +530,7 @@ function askCloudConsent(kind, then) {
     });
     box.querySelector('[data-m=ok]').onclick = async () => {
       ctx.closeModal();
-      state.settings = await AI.saveSettings({ cloudConsentAt: Date.now() });
+      state.settings = await AI.saveSettings({ [consentKey(cloud)]: Date.now() });
       then();
     };
   });
@@ -692,7 +699,7 @@ export async function openAiSettings(opts = {}) {
   const { focus, newRule, rulesFor: forUrl } = opts;
   await refreshState();
   const s = state.settings;
-  const key = await AI.getApiKey();
+  const keys = { gemini: await AI.getApiKey('gemini'), claude: await AI.getApiKey('claude') };
   const saved = await AI.insightCount();
   const groupRows = Object.entries(s.groups);
   const rules = [...s.rules];
@@ -708,39 +715,43 @@ export async function openAiSettings(opts = {}) {
       <div class="dialog-body ai-settings settings-panels">
       <section class="settings-panel" role="tabpanel" id="setPanel-general" aria-labelledby="setTab-general" ${tab === 'general' ? '' : 'hidden'}>
       <h3 class="first">AI summaries</h3>
-      <p class="ai-muted ai-small">One sentence and a status for every tab. Runs on your device by default; add your own Gemini API key for the cloud.</p>
+      <p class="ai-muted ai-small">One sentence and a status for every tab. Runs on your device by default; add your own Gemini or Claude API key for the cloud.</p>
       <label class="ai-check"><input type="checkbox" id="aiEnabled" ${s.enabled ? 'checked' : ''}><span>Show AI summaries and statuses</span></label>
       <label class="ai-check"><input type="checkbox" id="aiTabLines" ${s.tabLines ? 'checked' : ''}><span>Show the summary under each tab</span></label>
       <p class="ai-muted ai-small ai-indent">When off, hover a tab’s status to read its summary.</p>
 
       <h3>Engine</h3>
-      ${radio('aiEngine', 'auto', s.engine, 'Auto', 'On-device for tabs when ready. Gemini for groups when you’ve added a key.')}
+      ${radio('aiEngine', 'auto', s.engine, 'Auto', 'On-device for tabs when ready. The cloud for groups when you’ve added a key.')}
       ${radio('aiEngine', 'local', s.engine, 'On-device only', 'Nothing leaves your computer.')}
-      ${radio('aiEngine', 'cloud', s.engine, 'Gemini API only', 'Always use your Gemini key.')}
+      ${radio('aiEngine', 'cloud', s.engine, 'Cloud only', 'Always use your key for the cloud chosen below.')}
       <div class="ai-status-line"><span class="ai-dot ${state.local}"></span><span>On-device model (Gemini Nano): ${esc(LOCAL_LABEL[state.local] || state.local)}${state.localApi === 'summarizer' ? ' Statuses need Chrome’s Prompt API, which isn’t available here, so on-device summaries come without a status.' : ''}</span>
         ${state.local === 'downloadable' ? '<button class="btn sm" id="aiDownload" type="button">Download</button>' : ''}</div>
       <div class="ai-bar wide" id="aiDlBar" hidden><i></i></div>
 
       <h3>Summarize tabs automatically</h3>
       ${radio('aiAuto', 'local', s.auto, 'When it runs on this device', 'New and changed tabs get a summary in the background, using the on-device model only.')}
-      ${radio('aiAuto', 'all', s.auto, 'Always', 'Also uses your Gemini key when that’s the engine for tabs. Each new page is sent to Gemini.')}
+      ${radio('aiAuto', 'all', s.auto, 'Always', 'Also uses your cloud key when the cloud is the engine for tabs. Each new page is sent to the cloud.')}
       ${radio('aiAuto', 'off', s.auto, 'Off', 'Only when you press a summarize button.')}
       ${!state.access ? '<div class="ai-muted ai-small">Automatic summaries need page access (see Privacy below).</div>' : ''}
 
-      <h3>Gemini API key <span class="ai-muted">(optional)</span></h3>
+      <h3>Cloud <span class="ai-muted">(optional)</span></h3>
+      ${radio('aiCloud', 'gemini', s.cloud, 'Gemini API', 'Google’s Gemini, with your key from Google AI Studio.')}
+      ${radio('aiCloud', 'claude', s.cloud, 'Claude Haiku', 'Anthropic’s Claude Haiku, with your key from the Claude Console.')}
+      ${['gemini', 'claude'].map(c => `<div class="ai-cloud" data-cloud="${c}" ${s.cloud === c ? '' : 'hidden'}>
       <div class="ai-key-row">
-        <input id="aiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a key from Google AI Studio" value="${esc(key)}" aria-label="Gemini API key">
-        <button class="btn sm" id="aiKeyShow" type="button">Show</button>
-        <button class="btn sm" id="aiKeyTest" type="button">Test</button>
+        <input id="aiKey-${c}" class="ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste a key from ${c === 'claude' ? 'the Claude Console' : 'Google AI Studio'}" value="${esc(keys[c])}" aria-label="${CLOUDS[c].api} key">
+        <button class="btn sm" data-keyshow type="button">Show</button>
+        <button class="btn sm" data-keytest type="button">Test</button>
       </div>
-      <div class="ai-muted ai-small" id="aiKeyMsg">Get a key at <a href="${AI_STUDIO}" target="_blank" rel="noopener">Google AI Studio</a>. It’s stored unencrypted in this Chrome profile only (not synced). Use a key limited to the Gemini API.</div>
-      <label class="ai-field"><span>Gemini model</span><input id="aiModel" type="text" spellcheck="false" value="${esc(s.model)}" placeholder="${DEFAULT_MODEL}"></label>
+      <div class="ai-muted ai-small ai-key-msg">Get a key at <a href="${KEY_PAGE[c]}" target="_blank" rel="noopener">${c === 'claude' ? 'the Claude Console' : 'Google AI Studio'}</a>. It’s stored unencrypted in this Chrome profile only (not synced). ${c === 'claude' ? 'Use a key from a workspace with a spend limit.' : 'Use a key limited to the Gemini API.'}</div>
+      <label class="ai-field"><span>${CLOUDS[c].name} model</span><input id="aiModel-${c}" type="text" spellcheck="false" value="${esc(c === 'claude' ? s.claudeModel : s.model)}" placeholder="${c === 'claude' ? DEFAULT_CLAUDE_MODEL : DEFAULT_MODEL}"></label>
+      </div>`).join('')}
 
       <h3>Privacy</h3>
       <div class="ai-status-line"><span class="ai-dot ${state.access ? 'available' : 'unavailable'}"></span><span id="aiAccessText">Page access: ${state.access ? 'Tab Desk can read the text of pages it summarizes.' : 'Off. Summaries use titles and addresses only.'}</span>
         <button class="btn sm" id="aiAccess" type="button">${state.access ? 'Revoke' : 'Allow'}</button></div>
       <div class="ai-status-line"><span id="aiSavedText">${saved} saved tab ${saved === 1 ? 'summary' : 'summaries'} on this device.</span><button class="btn sm" id="aiClear" type="button" ${saved ? '' : 'disabled'}>Clear</button></div>
-      ${s.cloudConsentAt ? '<div class="ai-muted ai-small">You agreed to send page content to Gemini. Removing your key resets this.</div>' : ''}
+      ${['gemini', 'claude'].filter(c => s[consentKey(c)]).map(c => `<div class="ai-muted ai-small">You agreed to send page content to ${CLOUDS[c].name}. Removing your ${CLOUDS[c].name} key resets this.</div>`).join('')}
       </section>
 
       <section class="settings-panel" role="tabpanel" id="setPanel-instructions" aria-labelledby="setTab-instructions" ${tab === 'instructions' ? '' : 'hidden'}>
@@ -875,16 +886,23 @@ export async function openAiSettings(opts = {}) {
       if (el) { el.scrollIntoView({ block: 'center' }); el.querySelector('.ai-rule-ins').focus(); el.classList.add('flash'); }
     } else if (forUrl) $b('#aiRulesField').scrollIntoView({ block: 'center' });
     $b('[data-m=cancel]').onclick = ctx.closeModal;
-    $b('#aiKeyShow').onclick = () => { const i = $b('#aiKey'); const show = i.type === 'password'; i.type = show ? 'text' : 'password'; $b('#aiKeyShow').textContent = show ? 'Hide' : 'Show'; };
-    $b('#aiKeyTest').onclick = async () => {
-      const k = $b('#aiKey').value.trim();
-      const msg = $b('#aiKeyMsg');
-      if (!k) { msg.textContent = 'Paste a key first.'; return; }
-      const granted = await chrome.permissions.request({ origins: GEMINI_ORIGINS }).catch(() => false);
-      msg.textContent = 'Checking…';
-      try { await AI.testApiKey(k); msg.innerHTML = '<span class="ai-ok">The key works.</span>'; }
-      catch (e) { msg.innerHTML = `<span class="ai-bad">${esc(e.message)}</span>${granted ? '' : ' (Chrome didn’t allow contacting Gemini.)'}`; }
-    };
+    box.querySelectorAll('input[name=aiCloud]').forEach(r => r.onchange = () => {
+      box.querySelectorAll('.ai-cloud').forEach(el => { el.hidden = el.dataset.cloud !== r.value; });
+    });
+    box.querySelectorAll('.ai-cloud').forEach(el => {
+      const c = el.dataset.cloud;
+      const input = el.querySelector('.ai-key');
+      const msg = el.querySelector('.ai-key-msg');
+      el.querySelector('[data-keyshow]').onclick = e => { const show = input.type === 'password'; input.type = show ? 'text' : 'password'; e.target.textContent = show ? 'Hide' : 'Show'; };
+      el.querySelector('[data-keytest]').onclick = async () => {
+        const k = input.value.trim();
+        if (!k) { msg.textContent = 'Paste a key first.'; return; }
+        const granted = await chrome.permissions.request({ origins: ORIGINS[c] }).catch(() => false);
+        msg.textContent = 'Checking…';
+        try { await AI.testApiKey(k, c); msg.innerHTML = '<span class="ai-ok">The key works.</span>'; }
+        catch (e) { msg.innerHTML = `<span class="ai-bad">${esc(e.message)}</span>${granted ? '' : ` (Chrome didn’t allow contacting ${CLOUDS[c].name}.)`}`; }
+      };
+    });
     $b('#aiDownload')?.addEventListener('click', e => {
       const bar = $b('#aiDlBar');
       bar.hidden = false;
@@ -907,9 +925,11 @@ export async function openAiSettings(opts = {}) {
     $b('#aiClear').onclick = async e => { await AI.clearInsights(); e.target.disabled = true; $b('#aiSavedText').textContent = 'No saved summaries on this device.'; };
     box.querySelectorAll('[data-m=gdel]').forEach(b => b.onclick = () => { const li = b.closest('li'); removedGroups.add(li.dataset.gk); li.remove(); });
     $b('[data-m=ok]').onclick = async () => {
-      const newKey = $b('#aiKey').value.trim();
-      // Ask for the Gemini host inside the click, before any await.
-      const perm = newKey && newKey !== key ? chrome.permissions.request({ origins: GEMINI_ORIGINS }).catch(() => false) : Promise.resolve(true);
+      const newKeys = { gemini: $b('#aiKey-gemini').value.trim(), claude: $b('#aiKey-claude').value.trim() };
+      const changed = c => newKeys[c] !== keys[c];
+      // Ask for the API hosts of new keys inside the click, before any await.
+      const origins = ['gemini', 'claude'].filter(c => newKeys[c] && changed(c)).flatMap(c => ORIGINS[c]);
+      const perm = origins.length ? chrome.permissions.request({ origins }).catch(() => false) : Promise.resolve(true);
       const rulesOut = [...box.querySelectorAll('.ai-rule')].map(el => ({
         el,
         pattern: el.querySelector('.ai-rule-pat').value.trim(),
@@ -939,19 +959,23 @@ export async function openAiSettings(opts = {}) {
       const groups = { ...state.settings.groups };
       removedGroups.forEach(k => delete groups[k]);
       await perm;
-      await AI.setApiKey(newKey);
-      if (!newKey && key) chrome.permissions.remove({ origins: GEMINI_ORIGINS }).catch(() => {});
+      for (const c of ['gemini', 'claude']) {
+        await AI.setApiKey(newKeys[c], c);
+        if (!newKeys[c] && keys[c]) chrome.permissions.remove({ origins: ORIGINS[c] }).catch(() => {});
+      }
       await AI.saveSettings({
         enabled: $b('#aiEnabled').checked,
         tabLines: $b('#aiTabLines').checked,
         engine: box.querySelector('input[name=aiEngine]:checked')?.value || 'auto',
         auto: box.querySelector('input[name=aiAuto]:checked')?.value || 'local',
-        model: $b('#aiModel').value.trim() || DEFAULT_MODEL,
+        cloud: box.querySelector('input[name=aiCloud]:checked')?.value || 'gemini',
+        model: $b('#aiModel-gemini').value.trim() || DEFAULT_MODEL,
+        claudeModel: $b('#aiModel-claude').value.trim() || DEFAULT_CLAUDE_MODEL,
         general: $b('#aiGeneral').value.trim(),
         groups,
         rules: rulesOut.filter(r => r.pattern && (r.instructions || r.fields)).map(({ el, ...r }) => r),
         presets: $b('#aiPresets').checked,
-        ...(newKey !== key ? { cloudConsentAt: 0 } : {}),
+        ...Object.fromEntries(['gemini', 'claude'].filter(changed).map(c => [consentKey(c), 0])),
       });
       await refreshState();
       ctx.closeModal();

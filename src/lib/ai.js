@@ -1,6 +1,6 @@
 // AI summaries: settings, page text extraction, saved tab insights (one-sentence summary + status),
 // the on-device engines (Chrome's built-in Prompt API, falling back to the Summarizer API; both Gemini Nano)
-// and the optional cloud engine (Gemini API with the user's key).
+// and the optional cloud engine (Gemini API or Claude API, with the user's own key).
 // Runs in the Tab Desk page only: the built-in AI APIs aren't available in service workers.
 
 import {
@@ -10,11 +10,14 @@ import {
   cacheKey, fnv, pruneCache, mergeRemote, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
   insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
   sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES,
+  CLOUDS, cloudModel, cloudConsent, consentKey, claudeRequest, claudeHeaders, parseClaudeSse, claudeError,
 } from './ai-core.js';
 import { fieldPlanFor, decideStatus, foundAny, factsLine, fieldsBlock } from './fields.js';
 
 const SETTINGS_KEY = 'aiSettings';
 const API_KEY = 'aiGeminiKey';
+const CLAUDE_KEY = 'aiClaudeKey';
+const keyName = cloud => (cloud === 'claude' ? CLAUDE_KEY : API_KEY);
 const CACHE_KEY = 'aiCache';
 const INSIGHTS_KEY = 'aiTabInsights';
 const GROUP_INSIGHTS_KEY = 'aiGroupInsights';
@@ -38,24 +41,28 @@ export async function saveSettings(patch) {
   return next;
 }
 
-/** The Gemini key is kept in storage.local only, never storage.sync, so it stays on this device. */
-export async function getApiKey() {
-  const r = await chrome.storage.local.get(API_KEY);
-  return typeof r[API_KEY] === 'string' ? r[API_KEY] : '';
+/**
+ * API keys (cloud: 'gemini' | 'claude') are kept in storage.local only, never storage.sync, so they stay
+ * on this device.
+ */
+export async function getApiKey(cloud = 'gemini') {
+  const k = keyName(cloud);
+  const r = await chrome.storage.local.get(k);
+  return typeof r[k] === 'string' ? r[k] : '';
 }
 
-export async function setApiKey(key) {
+export async function setApiKey(key, cloud = 'gemini') {
   key = String(key || '').trim();
-  if (key) await chrome.storage.local.set({ [API_KEY]: key });
+  if (key) await chrome.storage.local.set({ [keyName(cloud)]: key });
   else {
-    await chrome.storage.local.remove(API_KEY);
-    await saveSettings({ cloudConsentAt: 0 });
+    await chrome.storage.local.remove(keyName(cloud));
+    await saveSettings({ [consentKey(cloud)]: 0 });
   }
 }
 
 export function onSettingsChanged(cb) {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && (changes[SETTINGS_KEY] || changes[API_KEY])) cb();
+    if (area === 'local' && (changes[SETTINGS_KEY] || changes[API_KEY] || changes[CLAUDE_KEY])) cb();
   });
 }
 
@@ -511,14 +518,63 @@ async function streamGemini({ key, model, system, user, signal, onChunk, json = 
   return acc;
 }
 
-export async function testApiKey(key) {
+async function streamClaude({ key, model, system, user, signal, onChunk, json = false }, retried = false) {
+  const { url, body } = claudeRequest({ model, system, user, json });
   let res;
   try {
-    res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', { headers: { 'x-goog-api-key': key } });
-  } catch {
-    throw new AiError('Couldn’t reach Gemini. Check your connection.', 'network');
+    res = await fetch(url, { method: 'POST', headers: claudeHeaders(key), body: JSON.stringify(body), signal });
+  } catch (e) {
+    if (e?.name === 'AbortError') throw e;
+    throw new AiError('Couldn’t reach Claude. Check your connection.', 'network');
   }
-  if (!res.ok) throw new AiError(geminiError(res.status, await res.text().catch(() => '')).message, 'key');
+  if (!res.ok) {
+    const err = claudeError(res.status, await res.text().catch(() => ''), res.headers.get('retry-after'));
+    if ((err.code === 'rate' || res.status === 529) && !retried && err.retry <= 10) {
+      await new Promise(r => setTimeout(r, Math.max(1, err.retry) * 1000));
+      return streamClaude({ key, model, system, user, signal, onChunk, json }, true);
+    }
+    throw new AiError(err.message, err.code);
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', acc = '', blocked = null, error = null;
+  const take = r => { buf = r.rest; blocked ||= r.blocked; error ||= r.error; if (r.texts.length) { acc += r.texts.join(''); onChunk?.(acc); } };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    take(parseClaudeSse(buf + dec.decode(value, { stream: true })));
+  }
+  if (buf) take(parseClaudeSse(buf + '\n'));
+  if (error) {
+    const e = claudeError(error.type === 'overloaded_error' ? 529 : 0, { error });
+    throw new AiError(e.message, e.code);
+  }
+  if (blocked) throw new AiError('Claude declined to summarize this.', 'blocked');
+  if (!acc.trim()) throw new AiError('Claude returned an empty summary.', 'empty');
+  return acc;
+}
+
+/** One call to the cloud the settings pick (Gemini or Claude), with that cloud's key and model. */
+async function streamCloud(settings, opts) {
+  const key = await getApiKey(settings.cloud);
+  const model = cloudModel(settings);
+  return settings.cloud === 'claude' ? streamClaude({ key, model, ...opts }) : streamGemini({ key, model, ...opts });
+}
+
+export async function testApiKey(key, cloud = 'gemini') {
+  const who = CLOUDS[cloud]?.name || 'Gemini';
+  let res;
+  try {
+    res = cloud === 'claude'
+      ? await fetch('https://api.anthropic.com/v1/models?limit=1', { headers: claudeHeaders(key) })
+      : await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', { headers: { 'x-goog-api-key': key } });
+  } catch {
+    throw new AiError(`Couldn’t reach ${who}. Check your connection.`, 'network');
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new AiError((cloud === 'claude' ? claudeError(res.status, text) : geminiError(res.status, text)).message, 'key');
+  }
   return true;
 }
 
@@ -526,19 +582,21 @@ export async function testApiKey(key) {
 
 /** What each engine can do right now. */
 export async function engineState() {
-  const [settings, key, local] = await Promise.all([getSettings(), getApiKey(), localAvailability()]);
+  const settings = await getSettings();
+  const [key, local] = await Promise.all([getApiKey(settings.cloud), localAvailability()]);
   return { settings, hasKey: !!key, local: local.state, localApi: local.api };
 }
 
 function pickEngine(kind, settings, local, hasKey) {
   const e = chooseEngine({ kind, setting: settings.engine, local, hasKey });
   if (e) return e;
-  if (settings.engine === 'cloud') throw new AiError('Add a Gemini API key in Settings to use the cloud engine.', 'no-engine');
-  if (settings.engine === 'local') throw new AiError('On-device AI isn’t available on this device. Add a Gemini API key in Settings to use the cloud instead.', 'no-engine');
-  throw new AiError('On-device AI isn’t available here (it needs desktop Chrome 138+ with enough memory and disk). Add a Gemini API key in Settings to use Gemini instead.', 'no-engine');
+  const api = CLOUDS[settings.cloud].api;
+  if (settings.engine === 'cloud') throw new AiError(`Add a ${api} key in Settings to use the cloud engine.`, 'no-engine');
+  if (settings.engine === 'local') throw new AiError(`On-device AI isn’t available on this device. Add a ${api} key in Settings to use the cloud instead.`, 'no-engine');
+  throw new AiError(`On-device AI isn’t available here (it needs desktop Chrome 138+ with enough memory and disk). Add a ${api} key in Settings to use ${CLOUDS[settings.cloud].name} instead.`, 'no-engine');
 }
 
-/** Which engine a summary would use. Returns 'local' | 'cloud' (throws AiError when neither works). */
+/** Which engine a summary would use. Returns 'local' | 'cloud' (throws AiError when neither works). The cloud is settings.cloud. */
 export async function plannedEngine(kind) {
   const { settings, hasKey, local } = await engineState();
   return pickEngine(kind, settings, local, hasKey);
@@ -570,7 +628,7 @@ export async function summarizeTab(tab, opts = {}) {
     };
   }
   if (!engine && !fieldInfo?.status) throw engineErr;
-  const sig = cacheKey([PROMPT_VERSION, engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, fnv(page.text), page.title,
+  const sig = cacheKey([PROMPT_VERSION, engine, engine === 'cloud' ? `${st.settings.cloud}:${cloudModel(st.settings)}` : st.localApi, instructions, fnv(page.text), page.title,
     fieldInfo ? [fieldInfo.values, fieldInfo.pattern, plan.rules] : null]);
   const prev = tabInsight(page.url);
   if (!opts.force && prev?.sig === sig && prev.summary) return putInsight(page.url, {});
@@ -584,9 +642,8 @@ export async function summarizeTab(tab, opts = {}) {
     const ai = fieldInfo ? { ...page, text: `Page fields (read from the page by code, trust these):\n${fieldsBlock(plan.fields, fieldInfo.values)}\n\n${page.text}` } : page;
     if (engine === 'cloud') {
       const { system, user } = tabPrompt({ ...ai, instructions, lang: uiLang() });
-      const key = await getApiKey();
-      r = parseInsight(await logged({ kind: 'tab', engine: 'cloud', model: st.settings.model, title: page.title, url: page.url, system, user },
-        () => streamGemini({ key, model: st.settings.model, system, user, json: true, signal: opts.signal })));
+      r = parseInsight(await logged({ kind: 'tab', engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), title: page.title, url: page.url, system, user },
+        () => streamCloud(st.settings, { system, user, json: true, signal: opts.signal })));
     } else {
       r = await localInsight(ai, instructions, { api: st.localApi, signal: opts.signal, onProgress: opts.onProgress });
     }
@@ -598,6 +655,7 @@ export async function summarizeTab(tab, opts = {}) {
   const changed = prev && prev.textSig && prev.textSig !== textSig;
   return putInsight(page.url, {
     summary: r.summary, status: r.status, facts: r.facts || '', engine: r.engine || engine, sig, textSig,
+    cloud: (r.engine || engine) === 'cloud' ? st.settings.cloud : undefined,
     reason: page.reason, readable: page.readable, title: page.title,
     statusFrom: fieldInfo?.status ? 'fields' : 'ai',
     fieldRule: fieldInfo ? (plan.preset || plan.pattern) : undefined,
@@ -614,9 +672,8 @@ async function fieldSentence(page, info, instructions, engine, st, opts) {
   try {
     if (engine === 'cloud') {
       const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, lang: uiLang(), max: 3000 });
-      const key = await getApiKey();
-      return parseInsight(await logged({ ...meta, engine: 'cloud', model: st.settings.model, system, user },
-        () => streamGemini({ key, model: st.settings.model, system, user, json: 'sentence', signal: opts.signal })));
+      return parseInsight(await logged({ ...meta, engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), system, user },
+        () => streamCloud(st.settings, { system, user, json: 'sentence', signal: opts.signal })));
     }
     if (engine === 'local' && st.localApi === 'prompt') {
       const { system, user } = sentencePrompt({ ...page, facts, status, excerpt, instructions, lang: localOut() });
@@ -669,17 +726,16 @@ export async function summarizeGroup(group, opts = {}) {
     pages.push({ ...p, summary: ins?.summary || '' });
   }
   const unreadable = pages.filter(p => !p.readable && !p.summary).map(p => ({ title: p.title, url: p.url, reason: p.reason }));
-  const sig = cacheKey(['group', engine, engine === 'cloud' ? st.settings.model : st.localApi, instructions, group.name, pages.map(p => [p.url, p.summary, fnv(p.text || '')])]);
+  const sig = cacheKey(['group', engine, engine === 'cloud' ? `${st.settings.cloud}:${cloudModel(st.settings)}` : st.localApi, instructions, group.name, pages.map(p => [p.url, p.summary, fnv(p.text || '')])]);
   const prev = groupInsight(group.name);
   if (!force && prev?.sig === sig && prev.summary) { onChunk?.(prev.summary); return prev; }
 
   let text;
   if (engine === 'cloud') {
-    onStatus?.('Asking Gemini…');
+    onStatus?.(`Asking ${CLOUDS[st.settings.cloud].name}…`);
     const { system, user } = groupPrompt({ name: group.name, tabs: pages, instructions, lang: uiLang() });
-    const key = await getApiKey();
-    text = await logged({ kind: 'group', engine: 'cloud', model: st.settings.model, group: group.name, system, user },
-      () => streamGemini({ key, model: st.settings.model, system, user, signal, onChunk }));
+    text = await logged({ kind: 'group', engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), group: group.name, system, user },
+      () => streamCloud(st.settings, { system, user, signal, onChunk }));
   } else {
     onStatus?.('Summarizing on this device…');
     const lines = pages.map(p => `- ${p.title}${p.summary ? `: ${p.summary}` : ''}`);
@@ -687,7 +743,7 @@ export async function summarizeGroup(group, opts = {}) {
   }
   const summary = oneSentence(text, 300);
   if (!summary) throw new AiError('The AI returned an empty summary.', 'empty');
-  groupInsights[groupKey(group.name)] = { summary, engine, sig, unreadable, skipped, at: Date.now() };
+  groupInsights[groupKey(group.name)] = { summary, engine, ...(engine === 'cloud' ? { cloud: st.settings.cloud } : {}), sig, unreadable, skipped, at: Date.now() };
   dirtyGroups.add(groupKey(group.name));
   scheduleSave();
   emit();
@@ -698,21 +754,20 @@ export async function summarizeGroup(group, opts = {}) {
 /**
  * Drafts instructions for a page rule by filling in INSTRUCTION_TEMPLATE from one example page.
  * opts: { pattern, tab (an open tab matching the pattern, or null), access, signal }
- * Only the title and address are sent to Gemini unless the user has agreed to send page content.
+ * Only the title and address are sent to the cloud unless the user has agreed to send page content.
  */
 export async function draftInstructions({ pattern, tab = null, access = false, signal } = {}) {
   const st = await engineState();
   const engine = pickEngine('tab', st.settings, st.local, st.hasKey);
-  const cloudOk = engine !== 'cloud' || !!st.settings.cloudConsentAt;
+  const cloudOk = engine !== 'cloud' || !!cloudConsent(st.settings);
   const page = tab ? await extractTab(tab, { access: access && cloudOk }) : { title: '', url: '', text: '' };
   let out;
   if (engine === 'cloud') {
     const { system, user } = draftPrompt({ pattern, ...page, lang: uiLang() });
-    const key = await getApiKey();
-    out = await logged({ kind: 'draft', engine: 'cloud', model: st.settings.model, title: page.title, url: page.url, pattern, system, user },
-      () => streamGemini({ key, model: st.settings.model, system, user, signal }));
+    out = await logged({ kind: 'draft', engine: 'cloud', cloud: st.settings.cloud, model: cloudModel(st.settings), title: page.title, url: page.url, pattern, system, user },
+      () => streamCloud(st.settings, { system, user, signal }));
   } else {
-    if (st.localApi !== 'prompt') throw new AiError('Drafting needs Chrome’s Prompt API or a Gemini key.', 'no-engine');
+    if (st.localApi !== 'prompt') throw new AiError('Drafting needs Chrome’s Prompt API or a cloud API key.', 'no-engine');
     const { system, user } = draftPrompt({ pattern, ...page, lang: localOut(), max: 5000 });
     const s = await self.LanguageModel.create({ ...lmIO(), initialPrompts: [{ role: 'system', content: system }] }).catch(e => { throw gestureError(e); });
     try { out = await logged({ kind: 'draft', engine: 'local', api: 'prompt', title: page.title, url: page.url, pattern, system, user }, () => s.prompt(user, { signal })); } finally { s.destroy?.(); }
