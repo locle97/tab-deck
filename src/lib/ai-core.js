@@ -6,12 +6,14 @@ export const DEFAULT_CLAUDE_MODEL = 'claude-haiku-5-5';
 export const MAX_GROUP_TABS = 20;
 export const MAX_LOCAL_GROUP_TABS = 12;
 export const MAX_INSTRUCTIONS = 2000;
+export const EVERY_DEFAULT = 30, EVERY_MIN = 5, EVERY_MAX = 24 * 60; // interval refresh, minutes
 
 export const DEFAULT_SETTINGS = Object.freeze({
   enabled: true,
   engine: 'auto',          // 'auto' | 'local' | 'cloud'
   cloud: 'gemini',         // which cloud API the 'cloud' engine uses: 'gemini' | 'claude'
-  auto: 'local',           // summarize tabs automatically: 'off' | 'local' (on-device only) | 'all'
+  auto: 'local',           // interval refresh: 'off' | 'local' (on-device only) | 'all'
+  every: EVERY_DEFAULT,    // interval refresh, minutes
   tabLines: false,         // show each tab's summary as a line under its title (otherwise only in the status tooltip)
   model: DEFAULT_MODEL,      // Gemini model
   claudeModel: DEFAULT_CLAUDE_MODEL,
@@ -28,6 +30,9 @@ export function normalizeSettings(s) {
   const out = { ...DEFAULT_SETTINGS, ...(s && typeof s === 'object' ? s : {}) };
   if (!['auto', 'local', 'cloud'].includes(out.engine)) out.engine = 'auto';
   if (!['off', 'local', 'all'].includes(out.auto)) out.auto = 'local';
+  out.every = Math.round(Number(out.every));
+  if (!Number.isFinite(out.every)) out.every = EVERY_DEFAULT;
+  out.every = Math.min(EVERY_MAX, Math.max(EVERY_MIN, out.every));
   if (!Object.hasOwn(CLOUDS, out.cloud)) out.cloud = 'gemini';
   if (typeof out.claudeModel !== 'string' || !out.claudeModel.trim()) out.claudeModel = DEFAULT_CLAUDE_MODEL;
   out.claudeModel = out.claudeModel.trim();
@@ -240,10 +245,75 @@ export function insightKey(url) { return String(url || '').replace(/#.*$/, ''); 
 export const INSIGHT_TTL = 30 * 24 * 3600 * 1000;
 export const INSIGHT_MAX = 1000;
 
-/** Should a tab be summarized automatically? */
-export function needsInsight(ins, { now = Date.now(), staleAfter = 60 * 60 * 1000 } = {}) {
-  if (!ins) return true;
-  return now - (ins.at || 0) > staleAfter;
+/* ---------- keeping summaries up to date ---------- */
+// Summaries are written when you press Summarize, or by the interval refresh every `every` minutes
+// (settings). Between those, a tab that gives a change signal (new address, reload, title change,
+// leaving it after working in it) is read once it settles and compared with its summary. Reading
+// costs no model call; when the page changed in a way that matters (contentSig), the summary is
+// marked outdated instead of being rewritten.
+
+export const REFRESH = {
+  settle: 5000,        // quiet time after the last signal before the tab is read
+  worked: 30 * 1000,   // active this long, then left: you probably changed something there
+};
+/** Signals that count even while you are on the tab. A title change waits until you leave it. */
+const URGENT = new Set(['nav', 'reload']);
+const RANK = { title: 1, worked: 2, reload: 3, nav: 4 };
+
+/** Merge a new change signal into a tab's pending one: the stronger reason wins, the wait restarts. */
+export function addMark(prev, reason, now = Date.now()) {
+  const keep = prev && (RANK[prev.reason] || 0) > (RANK[reason] || 0) ? prev.reason : reason;
+  return { reason: keep, due: now + REFRESH.settle };
+}
+
+/**
+ * Should this tab be read now to see if its summary is outdated?
+ * ins: its saved insight. mark: a pending change signal { reason, due }. active: it is the active tab
+ * in its window. lastAccessed: Chrome's tab.lastAccessed. firstSight: this Tab Desk page hasn't looked
+ * at the tab since it opened (then a visit since the last check counts as a signal).
+ * Returns { reason } ('' = not now; drop the mark unless `waiting`: it waits until you leave the tab)
+ * and, while waiting for it to settle, `at`: when to ask again.
+ */
+export function staleCheck({ ins, mark, active = false, lastAccessed = 0, firstSight = false, now = Date.now() }) {
+  if (!ins?.summary || ins.stale) return { reason: '' };
+  if (mark) {
+    if (now < mark.due) return { reason: '', at: mark.due };
+    if (active && !URGENT.has(mark.reason)) return { reason: '', waiting: true };
+    return { reason: mark.reason };
+  }
+  const checked = Math.max(ins.checkedAt || 0, ins.at || 0);
+  if (firstSight && lastAccessed > checked) return { reason: 'visited' };
+  return { reason: '' };
+}
+
+/** When the next interval refresh is due, given the last one (ms) and the setting (minutes). */
+export const nextRefreshAt = (last, every) => (last || 0) + every * 60 * 1000;
+
+/** A title without an unread count like "(3) " or "[12+] " in front, for change checks. */
+export function stableTitle(title) {
+  return String(title || '').replace(/^\s*[([]\d+\+?[)\]]\s*/, '').replace(/\s+/g, ' ').trim();
+}
+/** Page text without numbers, times and spacing, so counters and "3 min ago" don't count as a change. */
+export function stableText(text) {
+  return String(text || '').toLowerCase().replace(/\d+(?:[.,:]\d+)*/g, '#').replace(/\s+/g, ' ').trim();
+}
+/** Fingerprint of what a summary is about: the page text and title, without noise. */
+export function contentSig({ text = '', title = '' } = {}) {
+  return fnv(stableText(text)) + fnv(stableTitle(title));
+}
+
+/**
+ * Has a group changed since its summary was written? True when one of its tabs is outdated, tabs
+ * joined or left it, or a tab's summary is newer than the group's. groupIns.members: the tab addresses it was written from.
+ * tabs: [{ url, ins }] for the group's tabs now.
+ */
+export function groupOutdated(groupIns, tabs) {
+  if (groupIns?.summary && tabs.some(t => t.ins?.stale)) return true;
+  // Summaries saved before `members` existed can't tell, so they never show as outdated.
+  if (!groupIns?.summary || !Array.isArray(groupIns.members)) return false;
+  const was = new Set(groupIns.members), now = new Set(tabs.map(t => insightKey(t.url)));
+  if (was.size !== now.size || [...now].some(u => !was.has(u))) return true;
+  return tabs.some(t => (t.ins?.at || 0) > (groupIns.at || 0));
 }
 
 /* ---------- engine choice ---------- */
@@ -634,8 +704,10 @@ export function mergeRemote(remote, local, dirty) {
 
 /** Drop expired entries and keep the newest CACHE_MAX. Returns a new object. */
 export function pruneCache(cache, now = Date.now(), ttl = CACHE_TTL, max = CACHE_MAX) {
-  const live = Object.entries(cache || {}).filter(([, v]) => v && now - (v.at || 0) < ttl);
-  live.sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
+  // A tab summary that was checked and still holds counts as recent (checkedAt), not only one just written.
+  const t = v => Math.max(v.at || 0, v.checkedAt || 0);
+  const live = Object.entries(cache || {}).filter(([, v]) => v && now - t(v) < ttl);
+  live.sort((a, b) => t(b[1]) - t(a[1]));
   return Object.fromEntries(live.slice(0, max));
 }
 
