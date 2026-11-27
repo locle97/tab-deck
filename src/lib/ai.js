@@ -8,7 +8,7 @@ import {
   isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
   baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   cacheKey, fnv, pruneCache, mergeRemote, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
-  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION, contentSig,
+  insightKey, groupKey, normalizeStatus, migrateInsightStatuses, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION, contentSig,
   sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES,
   CLOUDS, cloudModel, cloudConsent, consentKey, claudeRequest, claudeHeaders, parseClaudeSse, claudeError,
 } from './ai-core.js';
@@ -243,6 +243,8 @@ export async function loadInsights() {
     const r = await chrome.storage.local.get([INSIGHTS_KEY, GROUP_INSIGHTS_KEY]);
     insights = r[INSIGHTS_KEY] || {};
     groupInsights = r[GROUP_INSIGHTS_KEY] || {};
+    // Done became Idle and Waiting became Working: rewrite statuses saved before that, once.
+    if (migrateInsightStatuses(insights)) chrome.storage.local.set({ [INSIGHTS_KEY]: insights }).catch(() => {});
     chrome.storage.onChanged.addListener(onStorageChanged);
   }
   return { insights, groupInsights };
@@ -687,7 +689,7 @@ export async function summarizeTab(tab, opts = {}) {
   }
   if (!r.summary) throw new AiError('The AI returned an empty summary.', 'empty');
   // A status set by hand was about the page as it was. The page has changed, so the new analysis wins:
-  // otherwise a stale "Needs you" sits next to a summary that says the PR is merged.
+  // otherwise a stale "Need action" sits next to a summary that says the PR is merged.
   const changed = !!prev?.summary && !sameContent && !!(prev.csig || prev.textSig);
   return putInsight(page.url, {
     summary: r.summary, status: r.status, facts: r.facts || '', engine: r.engine || engine, cfg, csig, fsig, stale: undefined, sig: undefined, textSig: undefined,

@@ -1,12 +1,12 @@
 // AI summaries on the Tab Desk page: a one-sentence summary under every tab, a status for each tab
-// (Needs you, In progress, Waiting, Done, Reference) judged by the AI or set by hand, a one-sentence
+// (Need action, Working, Idle, Reference) judged by the AI or set by hand, a one-sentence
 // summary per group, AI settings, and custom instructions (general, per group, per URL pattern).
 // The engines live in lib/ai.js.
 
 import * as AI from './lib/ai.js';
 import {
   groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, CLOUDS, cloudOf, cloudConsent, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
-  effectiveStatus, rollupStatus, staleCheck, addMark, stableTitle, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
+  effectiveStatus, normalizeStatus, rollupStatus, staleCheck, addMark, stableTitle, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
 import { getTabStrip, saveTabStrip } from './lib/tab-strip.js';
@@ -312,7 +312,7 @@ function statusMenu(anchor, tabId) {
   const ins = AI.tabInsight(url);
   const cur = effectiveStatus(ins);
   ctx.openMenu(anchor, m => {
-    ctx.menuLabel(m, ins?.status && !ins.manual ? `Status · AI says ${STATUSES[ins.status].label}` : 'Status');
+    ctx.menuLabel(m, normalizeStatus(ins?.status) && !ins.manual ? `Status · AI says ${STATUSES[normalizeStatus(ins.status)].label}` : 'Status');
     STATUS_ORDER.forEach(s => ctx.menuItem(m,
       `<span class="ai-st st-${s} static"><i></i>${STATUSES[s].label}</span><span class="ai-menu-hint">${cur === s ? IC.check : ''}</span>`,
       () => AI.setManualStatus(url, s)));
@@ -701,10 +701,10 @@ const FIELDS_HINT = `# One per line: name: CSS selector (add @attribute to read 
 viewer: meta[name="user-login"] @content
 state: .State
 reviewers[]: .reviewer .name`;
-const STATUS_HINT = `# One per line, first match wins. Statuses: Needs you, In progress, Waiting, Done, Reference, or AI.
-done when state matches /merged|closed/
-needs you when reviewers has {viewer}
-waiting when state is open
+const STATUS_HINT = `# One per line, first match wins. Statuses: Need action, Working, Idle, Reference, or AI.
+idle when state matches /merged|closed/
+need action when reviewers has {viewer}
+working when state is open
 ai otherwise`;
 const presetOptions = () => PRESETS.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
 // Help text hidden behind an (i) button: info(label) gives the button, hint(html) the text it shows.

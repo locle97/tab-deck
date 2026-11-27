@@ -391,7 +391,8 @@ function renderMain() {
 // Header: group and tab counts on the left; sort, grid/list, Summarize all and search on the right.
 // Cards: a tinted header with the name and one status pill, a status bar, the summary as one muted
 // line, the top tabs with their status as a colored left edge, and a tiny footer with the facts.
-// Groups that need you sort first; Done groups fold into a row at the bottom; the Inbox is a slim row.
+// Groups that need action sort first. A group never greys out: an open group is still a work stream,
+// and one with nothing running is Idle (waiting for its next task). The Inbox is a slim row.
 // Statuses come from AIUI (tabStatusOf / groupStatus), so this code doesn't care how they're worked out.
 const DASH_KEY = 'tabdesk.dashboard';
 const SORTS = { urgent: 'Most urgent', recent: 'Recently used', manual: 'Tab strip order' };
@@ -449,14 +450,20 @@ function statusBar(g) {
   return `<div class="st-bar" role="img" aria-label="${esc(label)}" title="${esc(label)}">${segs.map(x => `<i class="st-${x.status}" style="flex:${x.n}"></i>`).join('')}</div>`;
 }
 
+/** Footer note: how many of the group's tabs are running a task right now ("2 of 5 working"). */
+function cardProgress(g) {
+  if (!AIUI.aiEnabled()) return '';
+  const n = g.tabs.filter(t => tabSt(t) === 'working').length;
+  return n ? `<span class="card-prog">${n} of ${g.tabs.length} working</span>` : '';
+}
+
 function groupCard(g) {
   const s = groupSt(g);
   const used = timeAgo(lastUsed(g.tabs));
   const meta = [groupFacts(g.tabs)];
   if (used) meta.push(used === 'now' ? 'used now' : `used ${used} ago`);
   if (g.collapsed) meta.push('collapsed');
-  const done = AIUI.aiEnabled() ? g.tabs.filter(t => tabSt(t) === 'done').length : 0;
-  const cls = ['card', s === 'action' && 'needs-you', s === 'done' && 'is-done'].filter(Boolean).join(' ');
+  const cls = ['card', s === 'action' && 'needs-you'].filter(Boolean).join(' ');
   return `<article class="${cls}" data-card="${g.id}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
     <header class="card-head" draggable="true">
       <button class="card-name" data-act="open" type="button" title="${PANEL ? 'Open' : 'Show'} ${esc(g.name)} in ${PANEL ? 'the full dashboard' : 'detail'}">${esc(g.name)}</button>${AIUI.groupStatusBadge(g)}${AIUI.cardSumButton(g)}
@@ -471,7 +478,7 @@ function groupCard(g) {
       ${AIUI.groupSumCard(g)}
       ${cardTabList(g.id, g.tabs)}
     </div>
-    <footer class="card-meta"><span>${esc(meta.join(' · '))}</span>${done ? `<span class="card-prog">${done} of ${g.tabs.length} done</span>` : ''}</footer>
+    <footer class="card-meta"><span>${esc(meta.join(' · '))}</span>${cardProgress(g)}</footer>
   </article>`;
 }
 
@@ -575,7 +582,7 @@ function sortMenu(anchor) {
     menuLabel(m, 'Sort groups');
     Object.entries(SORTS).forEach(([k, label]) => {
       if (k === 'urgent' && !AIUI.aiEnabled()) return;
-      const hint = { urgent: 'Needs you first', recent: 'Last used first', manual: 'As in the tab strip' }[k];
+      const hint = { urgent: 'Need action first', recent: 'Last used first', manual: 'As in the tab strip' }[k];
       menuItem(m, `<span style="flex:1">${label}<span class="menu-sub">${hint}</span></span><span class="menu-check">${sortMode() === k ? ICON.check : ''}</span>`, () => {
         dash.sort = k; saveDash(); renderMain();
       });

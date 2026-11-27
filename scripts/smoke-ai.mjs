@@ -52,7 +52,7 @@ function fakes() {
     async prompt(text, opts = {}) {
       ai.calls.push({ system: this.o.initialPrompts?.[0]?.content || '', text, json: !!opts.responseConstraint });
       if (/write instructions for an AI that summarizes/.test(this.o.initialPrompts?.[0]?.content || '')) {
-        return 'Here you go:\n```\nThis page is: a test page.\nFacts: the secret phrase.\nSummary: say the secret phrase.\nStatus:\n- Needs you when the phrase is red.\n```';
+        return 'Here you go:\n```\nThis page is: a test page.\nFacts: the secret phrase.\nSummary: say the secret phrase.\nStatus:\n- Need action when the phrase is red.\n```';
       }
       if (opts.responseConstraint) {
         const status = /PR rule/.test(text) ? 'action' : /purple-otter/.test(text) ? 'working' : 'info';
@@ -87,7 +87,7 @@ function fakes() {
       const end = 'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n';
       const fmt = body.output_config?.format;
       const out = fmt && fmt.schema.required.includes('status')
-        ? ev('{"facts": "", "summary": "A cloud tab sentence from Claude. Extra.", ') + ev('"status": "done"}')
+        ? ev('{"facts": "", "summary": "A cloud tab sentence from Claude. Extra.", ') + ev('"status": "idle"}')
         : fmt ? ev('{"summary": "A field sentence from Claude."}')
         : ev('This group is about **Claude** testing. ') + ev('Extra sentence.');
       return new Response(out + end, { status: 200, headers: { 'content-type': 'text/event-stream' } });
@@ -208,9 +208,9 @@ try {
   await page.waitForFunction(() => /local testing of tabs\.$/.test(document.querySelector('[data-sum^="group:"] .ai-gtext')?.textContent || ''));
   await waitLine(page, '/alpha', /^Local summary mentions purple-otter\.$/);
   await waitLine(page, '/pr/5', /mentions purple-otter/);
-  assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Needs you/);
-  assert.match(await page.textContent('.tab:has-text("/alpha") .ai-st'), /In progress/);
-  assert.match(await page.textContent('.pane-meta'), /Needs you/);
+  assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Need action/);
+  assert.match(await page.textContent('.tab:has-text("/alpha") .ai-st'), /Working/);
+  assert.match(await page.textContent('.pane-meta'), /Need action/);
   const calls = await page.evaluate(() => window.__ai.calls);
   const prCall = calls.find(c => c.json && c.text.includes('/pr/5'));
   const alphaCall = calls.find(c => c.json && c.text.includes('/alpha'));
@@ -237,10 +237,10 @@ try {
 
   // Set a status by hand.
   await page.click('.tab:has-text("/alpha") .ai-st');
-  await page.click('.menu button:has-text("Done")');
-  await page.waitForFunction(() => /Done/.test(document.querySelector('.tab .ai-st.manual')?.textContent || ''));
+  await page.click('.menu button:has-text("Idle")');
+  await page.waitForFunction(() => /Idle/.test(document.querySelector('.tab .ai-st.manual')?.textContent || ''));
   const ins = await page.evaluate(async u => (await new Promise(r => setTimeout(r, 400)), (await chrome.storage.local.get('aiTabInsights')).aiTabInsights[u]), U('/alpha'));
-  assert.equal(ins.manual, 'done');
+  assert.equal(ins.manual, 'idle');
   assert.equal(ins.status, 'working');
   step('set a tab’s status by hand; the AI’s status is kept underneath');
 
@@ -319,7 +319,7 @@ try {
   await page.waitForSelector('.card:has-text("Research") .ai-gtext');
   assert.match(await page.textContent('.card-tab:has-text("/pr/5") .ai-line'), /mentions purple-otter/);
   assert.equal(await page.locator('.card-tab:has-text("/pr/5") .ai-edge.st-action').count(), 1);
-  assert.match(await page.textContent('.card:has-text("Research") .card-head'), /Needs you/);
+  assert.match(await page.textContent('.card:has-text("Research") .card-head'), /Need action/);
   assert.ok(await page.isVisible('.card:has-text("Research") .card-head [data-act=ai-group]'), 'Summarize sits in the card header');
   assert.equal(await page.locator('text=Tabs changed').count(), 0, 'groups show no "Tabs changed"; only tabs show Outdated');
   assert.ok(await page.isVisible('.card:has-text("Research") .st-bar'));
@@ -335,7 +335,11 @@ try {
   await page.click('[data-act=sort]');
   await page.click('.menu button:has-text("Most urgent")');
   await page.waitForFunction(() => document.querySelector('.card .card-name')?.textContent.trim() === 'Research');
-  assert.equal(await page.locator('.chip, .done-row').count(), 0, 'no status filter or Done row');
+  assert.equal(await page.locator('.chip, .done-row').count(), 0, 'no status filter or Done row: groups never grey out or fold away');
+  assert.doesNotMatch(await page.textContent('.card:has-text("Research") .card-meta'), /done/, 'no "X of Y done" footer');
+  assert.match(await page.getAttribute('.card:has-text("Research") .st-bar', 'title'), /Need action[\s\S]*Idle/, 'the status bar counts the new statuses');
+  assert.equal(await page.locator('.card.is-done').count(), 0);
+  assert.match(await page.textContent('.card:has-text("Other") .card-meta'), /1 of 1 working/, 'the footer counts tabs running a task');
   step('dashboard cards show tab summaries, status edges, the group sentence; and the sort menu works');
 
   // The same page open in two groups (Research has its own instructions, Other doesn't): summarizing
@@ -368,14 +372,14 @@ try {
   panel.on('pageerror', e => errors.push(`panel: ${e.message}`));
   await panel.goto(`chrome-extension://${extId}/panel.html`);
   await panel.waitForSelector('.card:has-text("Research") .ai-gtext');
-  assert.match(await panel.textContent('.card:has-text("Research") .card-head'), /Needs you/);
+  assert.match(await panel.textContent('.card:has-text("Research") .card-head'), /Need action/);
   assert.equal(await panel.locator('.card-tab:has-text("/pr/5") .ai-edge.st-action').count(), 1);
   assert.deepEqual((await panel.$$eval('.card .card-name', ns => ns.map(n => n.textContent.trim()))).slice(0, 2), ['Research', 'Other']);
   if (SHOTS) await panel.screenshot({ path: join(SHOTS, 'ai-side-panel.png') });
   await page.bringToFront();
   await page.click('.card-tab:has-text("/pr/5") .ai-edge');
-  await page.click('.menu button:has-text("Done")');
-  await panel.waitForSelector('.card-tab:has-text("/pr/5") .ai-edge.st-done');
+  await page.click('.menu button:has-text("Idle")');
+  await panel.waitForSelector('.card-tab:has-text("/pr/5") .ai-edge.st-idle');
   await page.click('.card-tab:has-text("/pr/5") .ai-edge');
   await page.click('.menu button:has-text("Let the AI decide")');
   await panel.waitForSelector('.card-tab:has-text("/pr/5") .ai-edge.st-action');
@@ -417,7 +421,7 @@ try {
   await page.hover('.tab:has-text("/pr/5")');
   await page.click('.tab:has-text("/pr/5") [data-act=ai-tab]');
   await waitLine(page, '/pr/5', /^A cloud tab sentence from Gemini\.$/);
-  assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Waiting/);
+  assert.match(await page.textContent('.tab:has-text("/pr/5") .ai-st'), /Working/, 'an old "waiting" reply counts as Working');
   f = await page.evaluate(() => window.__ai.fetches.at(-1));
   assert.equal(f.body.generationConfig.responseMimeType, 'application/json');
   assert.match(f.body.systemInstruction.parts[0].text, /^You look at one browser tab[\s\S]*in this order: \{"facts"[\s\S]*Instructions for this page:\nPR rule/);
@@ -443,7 +447,7 @@ try {
   await page.waitForSelector('#modal:not([hidden]) :text("Send page content to Anthropic Claude?")');
   await page.click('[data-m=ok]');
   await waitLine(page, '/alpha', /^A cloud tab sentence from Claude\.$/);
-  assert.match(await page.textContent('.tab:has-text("/alpha") .ai-st'), /Done/);
+  assert.match(await page.textContent('.tab:has-text("/alpha") .ai-st'), /Idle/);
   assert.match(await page.getAttribute('.tab:has-text("/alpha") .ai-sum', 'title'), /Claude · cloud/);
   f = await page.evaluate(() => window.__ai.fetches.at(-1));
   assert.equal(f.url, 'https://api.anthropic.com/v1/messages');
@@ -517,9 +521,9 @@ try {
   await fr.locator('.ai-fields .ai-info').click();
   assert.match(await fr.locator('.ai-fields .ai-hint').textContent(), /decide the status from them without the AI/);
   await fr.locator('.ai-rule-fields').fill('viewer: meta[name="user-login"] @content\nstate: .State\nassignee: label: Assignee\nmissing: .nope');
-  await fr.locator('.ai-rule-status').fill('done when state matches /closed|merged/\nneeds you when assignee has {viewer}\nai otherwise');
+  await fr.locator('.ai-rule-status').fill('idle when state matches /closed|merged/\nneed action when assignee has {viewer}\nai otherwise');
   await fr.locator('[data-m=ftest]').click();
-  await page.waitForFunction(() => /Needs you/.test(document.querySelector('.ai-rule:last-child .ai-fields-out')?.textContent || ''));
+  await page.waitForFunction(() => /Need action/.test(document.querySelector('.ai-rule:last-child .ai-fields-out')?.textContent || ''));
   const out = await fr.locator('.ai-fields-out').textContent();
   assert.match(out, /viewerme-user/);
   assert.match(out, /stateOpen/);
@@ -532,7 +536,7 @@ try {
   await page.waitForSelector('.ai-rule:last-child .ai-fields-out .ai-bad');
   await page.click('[data-m=ok]');
   await page.waitForFunction(() => /Status rules, line 1/.test(document.querySelector('.toast')?.textContent || ''));
-  await fr.locator('.ai-rule-status').fill('done when state matches /closed|merged/\nneeds you when assignee has {viewer}\nai otherwise');
+  await fr.locator('.ai-rule-status').fill('idle when state matches /closed|merged/\nneed action when assignee has {viewer}\nai otherwise');
   await page.click('[data-m=ok]');
   await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
   saved = (await page.evaluate(() => chrome.storage.local.get('aiSettings'))).aiSettings;
@@ -543,11 +547,11 @@ try {
   await page.hover('.tab:has-text("/issue/7")');
   await page.click('.tab:has-text("/issue/7") [data-act=ai-tab]');
   await waitLine(page, '/issue/7', /^A cloud tab sentence from Gemini\.$/);
-  assert.match(await page.textContent('.tab:has-text("/issue/7") .ai-st'), /Needs you/, 'status from the rules, not the AI’s "waiting"');
+  assert.match(await page.textContent('.tab:has-text("/issue/7") .ai-st'), /Need action/, 'status from the rules, not the AI’s "waiting"');
   assert.match(await page.getAttribute('.tab:has-text("/issue/7") .ai-st', 'title'), /from page fields[\s\S]*state: Open · assignee: me-user/);
   f = await page.evaluate(() => window.__ai.fetches.at(-1));
   assert.deepEqual(f.body.generationConfig.responseSchema.required, ['summary'], 'the AI is asked for the sentence only');
-  assert.match(f.body.contents[0].parts[0].text, /State: state: Open · assignee: me-user\nStatus: Needs you/);
+  assert.match(f.body.contents[0].parts[0].text, /State: state: Open · assignee: me-user\nStatus: Need action/);
   assert.ok(f.body.contents[0].parts[0].text.length < 4000, 'only a short excerpt is sent');
   step('page fields on any site: Test shows each value and the status; the status comes from the rules and the AI only writes the sentence');
 

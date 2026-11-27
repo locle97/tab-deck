@@ -30,16 +30,16 @@ x: div[
 });
 
 test('parseStatusRules accepts status keys and labels, several conditions, otherwise and ai', () => {
-  const { rules, errors } = parseStatusRules(`done when state matches /merged|closed/
-Needs you when reviewers has {viewer} and state is open
-in progress when ci is not empty
+  const { rules, errors } = parseStatusRules(`idle when state matches /merged|closed/
+Need action when reviewers has {viewer} and state is open
+working when ci is not empty
 reference when title does not contain "WIP"
 ai otherwise
 soon when x is y
 done when nothing
 done if x`);
   assert.deepEqual(rules, [
-    { status: 'done', conds: [{ field: 'state', op: 'matches', value: '/merged|closed/' }] },
+    { status: 'idle', conds: [{ field: 'state', op: 'matches', value: '/merged|closed/' }] },
     { status: 'action', conds: [{ field: 'reviewers', op: 'has', value: '{viewer}' }, { field: 'state', op: 'eq', value: 'open' }] },
     { status: 'working', conds: [{ field: 'ci', op: 'exists', value: '' }] },
     { status: 'info', conds: [{ field: 'title', op: 'ncontains', value: 'WIP' }] },
@@ -71,7 +71,7 @@ test('conditions: case-insensitive, lists, references, regex, missing references
 
 test('decideStatus: first matching rule wins, null when none', () => {
   const { rules } = parseStatusRules('done when state is merged\naction when state is open\ninfo otherwise');
-  assert.deepEqual(decideStatus(rules, { state: 'Merged' }), { status: 'done', index: 0 });
+  assert.deepEqual(decideStatus(rules, { state: 'Merged' }), { status: 'idle', index: 0 });
   assert.deepEqual(decideStatus(rules, { state: 'open' }), { status: 'action', index: 1 });
   assert.deepEqual(decideStatus(rules, { state: 'draft' }), { status: 'info', index: 2 });
   assert.equal(decideStatus(parseStatusRules('done when state is merged').rules, { state: 'x' }), null);
@@ -129,19 +129,19 @@ test('GitHub PR preset: status follows who you are and what the page shows', () 
   const { rules } = parseStatusRules(p.statusRules);
   const base = { viewer: 'me', author: 'ann', state: 'Open', requested: [], reviews: [], mergebox: [], ci: '' };
   const d = v => decideStatus(rules, { ...base, ...v })?.status;
-  assert.equal(d({ state: 'Merged' }), 'done');
-  assert.equal(d({ state: 'Closed', author: 'me' }), 'done');
+  assert.equal(d({ state: 'Merged' }), 'idle');
+  assert.equal(d({ state: 'Closed', author: 'me' }), 'idle');
   assert.equal(d({ requested: ['Awaiting requested review from me'] }), 'action');
   assert.equal(d({ requested: ['Awaiting requested review from someone'] }), 'info');
   assert.equal(d({ author: 'me', state: 'Draft' }), 'working');
   assert.equal(d({ author: 'me', mergebox: ['Changes requested'] }), 'action');
   assert.equal(d({ author: 'me', ci: 'https://github.githubassets.com/favicons/favicon-failure.svg' }), 'action');
   assert.equal(d({ author: 'me', mergebox: ['All checks have passed', 'This branch has no conflicts with the base branch'] }), 'action');
-  assert.equal(d({ author: 'me', mergebox: ['Review required', 'All checks have passed'] }), 'waiting');
-  assert.equal(d({ author: 'me', mergebox: ['Some checks haven’t completed yet'] }), 'waiting');
-  assert.equal(d({ reviews: ['me approved these changes'] }), 'waiting');
+  assert.equal(d({ author: 'me', mergebox: ['Review required', 'All checks have passed'] }), 'working');
+  assert.equal(d({ author: 'me', mergebox: ['Some checks haven’t completed yet'] }), 'working');
+  assert.equal(d({ reviews: ['me approved these changes'] }), 'working');
   assert.equal(d({}), 'info');
-  // No viewer found: nothing about "you" can match, so it isn't wrongly "Needs you".
+  // No viewer found: nothing about "you" can match, so it isn't wrongly "Need action".
   assert.equal(d({ viewer: '', requested: ['Awaiting requested review from me'] }), 'info');
 });
 
@@ -152,10 +152,10 @@ test('GitHub Actions preset: status from the run status, else the favicon, else 
   assert.equal(d({ status: 'In progress' }), 'working');
   assert.equal(d({ status: 'Queued' }), 'working');
   assert.equal(d({ status: 'Failure' }), 'action');
-  assert.equal(d({ status: 'Success' }), 'done');
-  assert.equal(d({ status: 'Cancelled' }), 'info');
+  assert.equal(d({ status: 'Success' }), 'idle');
+  assert.equal(d({ status: 'Cancelled' }), 'idle');
   assert.equal(d({ ci: '/favicons/favicon-pending.svg' }), 'working');
-  assert.equal(d({ ci: '/favicons/favicon-success.svg' }), 'done');
+  assert.equal(d({ ci: '/favicons/favicon-success.svg' }), 'idle');
   assert.equal(d({}), 'unknown');
 });
 
@@ -165,9 +165,15 @@ test('sentence prompt: facts and status are given, the AI only writes the senten
   assert.match(system, /don't judge the status/);
   assert.match(system, /Mention the branch/);
   assert.match(system, /untrusted/);
-  assert.match(user, /State: state: Open\nStatus: Needs you/);
+  assert.match(user, /State: state: Open\nStatus: Need action/);
   assert.ok(user.length < 2000);
   assert.equal(templateSentence({ title: 'Fix it', facts: 'state: Open' }), 'Fix it · state: Open');
   const req = geminiRequest({ model: 'm', system, user, json: 'sentence' });
   assert.deepEqual(req.body.generationConfig.responseSchema.required, ['summary']);
+});
+
+test('status rules written with the old names still work: Done is Idle, Waiting and In progress are Working', () => {
+  const { rules, errors } = parseStatusRules('done when state is merged\nwaiting when state is open\nin progress when state is draft\nneeds you otherwise');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(rules.map(r => r.status), ['idle', 'working', 'working', 'action']);
 });

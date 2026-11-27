@@ -182,27 +182,51 @@ export function suggestPattern(url) {
 
 /* ---------- status ---------- */
 
+// Tabs are treated as agents or work streams: each one is waiting on you, running a task, idle
+// (finished, or waiting for you to give it the next task) or just something to read.
 export const STATUSES = {
-  action: { label: 'Needs you', hint: 'Waiting for you to do something: review, reply, approve, fix or finish.' },
-  working: { label: 'In progress', hint: 'Being worked on or running: a build, a draft, an agent, a checkout.' },
-  waiting: { label: 'Waiting', hint: 'Blocked on someone or something else.' },
-  done: { label: 'Done', hint: 'Finished: merged, closed, resolved, sent, completed.' },
+  action: { label: 'Need action', hint: 'Waiting for you to do something: review, reply, approve, answer, fix or decide.' },
+  working: { label: 'Working', hint: 'Running or being worked on: a task in progress, a build, an agent, a draft, or waiting on others.' },
+  idle: { label: 'Idle', hint: 'Nothing running: finished, merged, closed or sent, and waiting for you to give it a next task.' },
   info: { label: 'Reference', hint: 'Something to read or look up. No task.' },
 };
-export const STATUS_ORDER = ['action', 'working', 'waiting', 'done', 'info'];
-export const normalizeStatus = s => (STATUS_ORDER.includes(s) ? s : null);
+export const STATUS_ORDER = ['action', 'working', 'idle', 'info'];
+/** Statuses saved by older versions, and what they mean now. */
+export const LEGACY_STATUS = { done: 'idle', waiting: 'working' };
+export const normalizeStatus = s => {
+  const k = LEGACY_STATUS[s] || s;
+  return STATUS_ORDER.includes(k) ? k : null;
+};
+
+/**
+ * Rewrite statuses saved by older versions (Done, Waiting) to the current ones, in place.
+ * Returns true when anything changed, so the caller can save the result.
+ */
+export function migrateInsightStatuses(map) {
+  let changed = false;
+  for (const ins of Object.values(map || {})) {
+    if (!ins || typeof ins !== 'object') continue;
+    for (const f of ['status', 'manual']) {
+      if (ins[f] in LEGACY_STATUS) { ins[f] = LEGACY_STATUS[ins[f]]; changed = true; }
+    }
+  }
+  return changed;
+}
 
 /** The most urgent status of a list (null when none is known). */
 export function rollupStatus(list) {
   let best = null;
-  for (const s of list) if (normalizeStatus(s) && (best == null || STATUS_ORDER.indexOf(s) < STATUS_ORDER.indexOf(best))) best = s;
+  for (const raw of list) {
+    const s = normalizeStatus(raw);
+    if (s && (best == null || STATUS_ORDER.indexOf(s) < STATUS_ORDER.indexOf(best))) best = s;
+  }
   return best;
 }
 
-/** Sort rank for "most urgent first": unknown sorts after Waiting, before Done. */
+/** Sort rank for "most urgent first": unknown sorts after Working, before Idle. */
 export function statusRank(s) {
-  const i = STATUS_ORDER.indexOf(s);
-  return i < 0 ? 2.5 : i;
+  const i = STATUS_ORDER.indexOf(normalizeStatus(s));
+  return i < 0 ? 1.5 : i;
 }
 
 /** The status to show: a status the person set by hand wins over the AI's. */
@@ -369,7 +393,7 @@ export function userInstructionBlock(instructions) {
 const STATUS_GUIDE = STATUS_ORDER.map(k => `"${k}" (${STATUSES[k].label}): ${STATUSES[k].hint}`).join('\n');
 
 /** Bump when the tab prompt or schema changes, so saved summaries are redone with the new one. */
-export const PROMPT_VERSION = 5;
+export const PROMPT_VERSION = 6;
 
 // "facts" comes first on purpose: the model writes down the page's own state before it summarizes,
 // then picks the status, so the summary and the status are drawn from the same facts.
@@ -388,10 +412,9 @@ export const INSTRUCTION_TEMPLATE = `This page is: …
 Facts: …
 Summary: …
 Status:
-- Needs you when …
-- In progress when …
-- Waiting when …
-- Done when …
+- Need action when …
+- Working when …
+- Idle when …
 - Reference when …`;
 
 /** Used when no page rule, group or general instructions apply. Same shape as the template. */
@@ -399,12 +422,11 @@ export const DEFAULT_TAB_INSTRUCTIONS = `This page is: any web page.
 Facts: the page's own current state in a few words, copied from what the page shows (for example "Merged", "Open · review requested from you", "Draft · 2 checks failing", "Order delivered"). Trust the "Page state:" line and the page's status areas over older comments or the description. Empty if the page has no state.
 Summary: what this page is and, if there is a task, where it stands.
 Status:
-- Needs you when you have to do something: review, reply, approve, fix or finish.
-- In progress when it is being worked on or running: a build, a draft, an agent.
-- Waiting when it is blocked on someone or something else.
-- Done when it is finished: merged, closed, resolved, sent, completed.
+- Need action when you have to do something: review, reply, approve, answer, fix or decide.
+- Working when a task is running or in progress: a build, an agent working, a draft, or something waiting on others.
+- Idle when nothing is running: the task is finished (merged, closed, resolved, sent, completed) or it waits for you to give it a next task.
 - Reference when it is something to read or look up, with no task.
-A merged or closed pull request is Done; one waiting on your review or changes is Needs you; one waiting on others' review or CI is Waiting.`;
+A merged or closed pull request is Idle; one waiting on your review or changes is Need action; one waiting on others' review or CI is Working. An AI chat or agent that is still answering is Working, one that asks you a question is Need action, and one that has finished its answer is Idle.`;
 
 /** The fixed part of every tab prompt: the reply format. Detailed instructions go after it. */
 export function baseTabPrompt(lang = 'en') {

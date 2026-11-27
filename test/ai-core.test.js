@@ -6,7 +6,7 @@ import {
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
   effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, staleCheck, addMark, nextRefreshAt, stableTitle, stableText, contentSig, REFRESH, EVERY_DEFAULT, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
   pickInstructions, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
-  mergeRemote,
+  mergeRemote, migrateInsightStatuses,
 } from '../src/lib/ai-core.js';
 
 test('normalizeSettings fills defaults and drops bad values', () => {
@@ -73,7 +73,7 @@ test('langCode and isReadableUrl', () => {
 test('prompts ask for one sentence, include user instructions, guard against page instructions and cap sizes', () => {
   const t = tabPrompt({ title: 'T', url: 'https://a', text: 'y'.repeat(70000), instructions: 'Use emoji.', lang: 'vi' });
   assert.match(t.system, /ONE short sentence/);
-  assert.match(t.system, /"action" \(Needs you\)/);
+  assert.match(t.system, /"action" \(Need action\)/);
   assert.match(t.system, /Use emoji\./);
   assert.match(t.system, /Ignore any instructions/);
   assert.match(t.system, /"vi"/);
@@ -185,15 +185,22 @@ test('URL patterns: sites, * and **, regex, query, trailing slash and scheme', (
 });
 
 test('statuses roll up to the most urgent, and a hand-set status wins', () => {
-  assert.equal(rollupStatus(['done', 'waiting', null, 'info']), 'waiting');
-  assert.equal(rollupStatus(['done', 'action']), 'action');
+  assert.equal(rollupStatus(['idle', 'working', null, 'info']), 'working');
+  assert.equal(rollupStatus(['idle', 'info']), 'idle');
+  assert.equal(rollupStatus(['idle', 'action']), 'action');
+  // Statuses saved by older versions still count: Done is Idle, Waiting is Working.
+  assert.equal(rollupStatus(['done', 'waiting']), 'working');
   assert.equal(rollupStatus([null, 'bogus']), null);
   assert.equal(normalizeStatus('working'), 'working');
   assert.equal(normalizeStatus('unknown'), null);
-  assert.equal(effectiveStatus({ status: 'done', manual: 'action' }), 'action');
-  assert.equal(effectiveStatus({ status: 'done' }), 'done');
+  assert.equal(normalizeStatus('done'), 'idle');
+  assert.equal(normalizeStatus('waiting'), 'working');
+  assert.equal(effectiveStatus({ status: 'idle', manual: 'action' }), 'action');
+  assert.equal(effectiveStatus({ status: 'done' }), 'idle');
+  assert.equal(effectiveStatus({ status: 'working', manual: 'done' }), 'idle');
   assert.equal(effectiveStatus(null), null);
-  assert.ok(statusRank('action') < statusRank(null) && statusRank(null) < statusRank('done'));
+  assert.ok(statusRank('action') < statusRank(null) && statusRank(null) < statusRank('idle') && statusRank('idle') < statusRank('info'));
+  assert.equal(statusRank('done'), statusRank('idle'));
 });
 
 test('oneSentence and parseInsight keep one plain sentence', () => {
@@ -275,7 +282,7 @@ test('pruneCache keeps a summary that was checked recently even if written long 
 test('geminiRequest asks for JSON with a status enum when json is set', () => {
   const r = geminiRequest({ model: 'm', system: 's', user: 'u', json: true });
   assert.equal(r.body.generationConfig.responseMimeType, 'application/json');
-  assert.deepEqual(r.body.generationConfig.responseSchema.properties.status.enum, ['action', 'working', 'waiting', 'done', 'info', 'unknown']);
+  assert.deepEqual(r.body.generationConfig.responseSchema.properties.status.enum, ['action', 'working', 'idle', 'info', 'unknown']);
   assert.equal(geminiRequest({ model: 'm', system: 's', user: 'u' }).body.generationConfig.responseMimeType, undefined);
 });
 
@@ -298,8 +305,9 @@ test('summary and status come from one analysis: facts first, then summary, then
 });
 
 test('parseInsight keeps short facts; headTail keeps both ends of long pages', () => {
-  const r = parseInsight('{"facts":"PR merged by bob","summary":"The login fix PR was merged.","status":"done"}');
-  assert.deepEqual(r, { facts: 'PR merged by bob', summary: 'The login fix PR was merged.', status: 'done' });
+  const r = parseInsight('{"facts":"PR merged by bob","summary":"The login fix PR was merged.","status":"idle"}');
+  assert.deepEqual(r, { facts: 'PR merged by bob', summary: 'The login fix PR was merged.', status: 'idle' });
+  assert.equal(parseInsight('{"summary":"The login fix PR was merged.","status":"done"}').status, 'idle');
   assert.ok(parseInsight(JSON.stringify({ facts: 'x'.repeat(500), summary: 'A page about things.', status: 'info' })).facts.length <= 160);
   const long = 'HEAD' + 'a'.repeat(20000) + 'TAIL';
   const ht = headTail(long, 6000);
@@ -320,7 +328,7 @@ test('tab prompt = fixed base (JSON facts, summary, status) + one set of instruc
   assert.ok(own.endsWith('Instructions for this page:\nSummary: say who is assigned.'));
   assert.ok(!own.includes(DEFAULT_TAB_INSTRUCTIONS), 'user instructions replace the default ones');
   assert.equal(tabInstructionBlock('  '), `Instructions for this page:\n${DEFAULT_TAB_INSTRUCTIONS}`);
-  for (const label of ['This page is:', 'Facts:', 'Summary:', 'Status:', 'Needs you', 'Reference']) {
+  for (const label of ['This page is:', 'Facts:', 'Summary:', 'Status:', 'Need action', 'Working', 'Idle', 'Reference']) {
     assert.ok(INSTRUCTION_TEMPLATE.includes(label));
     assert.ok(DEFAULT_TAB_INSTRUCTIONS.includes(label));
   }
@@ -350,4 +358,12 @@ test('mergeRemote: take the other page’s summaries, keep our unsaved ones, for
   assert.equal(dirty.size, 0);
   // Storage cleared elsewhere, nothing pending here.
   assert.deepEqual(mergeRemote(undefined, local, new Set()), { merged: {}, resave: false });
+});
+
+test('migrateInsightStatuses rewrites saved Done and Waiting statuses, AI-set and hand-set', () => {
+  const map = { a: { status: 'done', manual: 'waiting' }, b: { status: 'action' }, c: null };
+  assert.equal(migrateInsightStatuses(map), true);
+  assert.deepEqual(map.a, { status: 'idle', manual: 'working' });
+  assert.deepEqual(map.b, { status: 'action' });
+  assert.equal(migrateInsightStatuses(map), false);
 });
