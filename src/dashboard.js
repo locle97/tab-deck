@@ -528,7 +528,7 @@ function panelBar() {
       <span class="grow"></span>
       ${ai && total ? `<button class="icon-btn" data-act="sum-all" type="button" ${running ? 'disabled' : ''} title="Summarize every group and its tabs" aria-label="Summarize all">${AIUI.sparkIcon()}</button>` : ''}
       <button class="icon-btn" data-act="search" type="button" title="Jump to a tab or group (${MOD} K)" aria-label="Search">${ICON.search}</button>
-      <button class="icon-btn" data-act="settings" type="button" title="Settings: AI summaries and summary instructions" aria-label="Settings">${ICON.gear}</button>
+      <button class="icon-btn" data-act="settings" type="button" title="Settings: tab strip, AI summaries and summary instructions" aria-label="Settings">${ICON.gear}</button>
     </div>
   </div>`;
 }

@@ -2,6 +2,8 @@
 // "Full dashboard" button, the icon's right-click menu or a shortcut, reusing an existing Tab Desk
 // tab when there is one.
 
+import { getTabStrip, groupsToCollapse } from './lib/tab-strip.js';
+
 const PAGE = chrome.runtime.getURL('dashboard.html');
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(e => console.error(e));
@@ -42,3 +44,22 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   openDashboard({ view: msg.view || '', windowId: msg.windowId }).then(() => reply(true), e => reply(String(e)));
   return true;
 });
+
+// Optional: when you switch to a tab in a group, collapse the other groups in that window's tab
+// strip (Settings → General → Tab strip). Off by default.
+
+async function collapseOtherGroups({ tabId, windowId }) {
+  if (!(await getTabStrip()).collapseOthers) return;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || tab.groupId === -1) return;
+  const ids = groupsToCollapse(await chrome.tabGroups.query({ windowId }), tab.groupId, windowId);
+  for (const id of ids) {
+    try {
+      await chrome.tabGroups.update(id, { collapsed: true });
+    } catch {
+      // Chrome refuses edits while a tab is being dragged; try once more shortly after.
+      setTimeout(() => chrome.tabGroups.update(id, { collapsed: true }).catch(() => {}), 300);
+    }
+  }
+}
+chrome.tabs.onActivated.addListener(info => { collapseOtherGroups(info).catch(e => console.error(e)); });

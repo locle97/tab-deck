@@ -9,6 +9,7 @@ import {
   effectiveStatus, rollupStatus, staleCheck, addMark, stableTitle, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
+import { getTabStrip, saveTabStrip } from './lib/tab-strip.js';
 import { parseFields, parseStatusRules, decideStatus, factsLine, PRESETS } from './lib/fields.js';
 
 const ORIGINS = { gemini: ['https://generativelanguage.googleapis.com/*'], claude: ['https://api.anthropic.com/*'] };
@@ -818,6 +819,7 @@ export async function openAiSettings(opts = {}) {
   const s = state.settings;
   const keys = { gemini: await AI.getApiKey('gemini'), claude: await AI.getApiKey('claude') };
   const saved = await AI.insightCount();
+  const strip = await getTabStrip();
   const groupRows = Object.entries(s.groups);
   const rules = [...s.rules];
   if (newRule != null && !rules.some(r => r.pattern === newRule)) rules.push({ pattern: newRule, instructions: '' });
@@ -831,7 +833,11 @@ export async function openAiSettings(opts = {}) {
       </nav>
       <div class="dialog-body ai-settings settings-panels">
       <section class="settings-panel" role="tabpanel" id="setPanel-general" aria-labelledby="setTab-general" ${tab === 'general' ? '' : 'hidden'}>
-      <h3 class="first">AI summaries</h3>
+      <h3 class="first">Tab strip</h3>
+      <label class="ai-check"><input type="checkbox" id="stripCollapseOthers" ${strip.collapseOthers ? 'checked' : ''}><span>Collapse other groups when I switch to a tab in a group</span></label>
+      <p class="ai-muted ai-small ai-indent">Keeps only the active tab’s group open in Chrome’s tab bar, in that window. Ungrouped tabs leave the groups as they are.</p>
+
+      <h3>AI summaries</h3>
       <p class="ai-muted ai-small">One sentence and a status for every tab. Runs on your device by default; add your own Gemini or Claude API key for the cloud.</p>
       <label class="ai-check"><input type="checkbox" id="aiEnabled" ${s.enabled ? 'checked' : ''}><span>Show AI summaries and statuses</span></label>
       <label class="ai-check"><input type="checkbox" id="aiTabLines" ${s.tabLines ? 'checked' : ''}><span>Show the summary under each tab</span></label>
@@ -1082,6 +1088,7 @@ export async function openAiSettings(opts = {}) {
         await AI.setApiKey(newKeys[c], c);
         if (!newKeys[c] && keys[c]) chrome.permissions.remove({ origins: ORIGINS[c] }).catch(() => {});
       }
+      await saveTabStrip({ collapseOthers: $b('#stripCollapseOthers').checked });
       await AI.saveSettings({
         enabled: $b('#aiEnabled').checked,
         tabLines: $b('#aiTabLines').checked,
