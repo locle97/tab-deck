@@ -6,7 +6,7 @@
 
 import {
   DEFAULT_SETTINGS, normalizeSettings, instructionsFor, chooseEngine, cleanText, langCode,
-  isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
+  isReadableUrl, notLoaded, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
   baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   cacheKey, fnv, pruneCache, mergeRemote, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
   insightKey, groupKey, normalizeStatus, migrateInsightStatuses, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION, contentSig,
@@ -209,7 +209,7 @@ export async function extractTab(tab, { access, fields = null }) {
   const base = { title: tab.title || url, url, lang: '', text: '', readable: false, reason: '' };
   if (tab.incognito) return { ...base, reason: 'incognito' };
   if (!isReadableUrl(url)) return { ...base, reason: 'restricted' };
-  if (tab.discarded || tab.frozen) return { ...base, reason: 'sleeping' };
+  if (notLoaded(tab)) return { ...base, reason: 'sleeping' };
   if (!access) return { ...base, reason: 'no-access' };
   try {
     const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: extractInPage });
@@ -713,6 +713,9 @@ export async function plannedEngine(kind) {
   return pickEngine(kind, settings, local, hasKey);
 }
 
+/** The tab isn't loaded (or is still loading) and gave no text: nothing to summarize yet. */
+const notReady = (tab, page) => page.reason === 'sleeping' || (!page.readable && !!tab.status && tab.status !== 'complete');
+
 /**
  * Read a tab and work out what its summary would be made from, and whether that differs from the
  * saved one. Shared by summarizeTab and checkTab.
@@ -757,7 +760,7 @@ async function prepareTab(tab, opts) {
  */
 export async function checkTab(tab, opts = {}) {
   const { page, prev, sameContent } = await prepareTab(tab, opts);
-  if (!prev?.summary) return null;
+  if (!prev?.summary || notReady(tab, page)) return prev || null;
   return putInsight(page.url, { stale: sameContent ? undefined : true }, { written: false });
 }
 
@@ -766,10 +769,14 @@ export async function checkTab(tab, opts = {}) {
  * opts: { groupName, force, reuse, signal, onProgress(fraction), access, engine? }
  * Skips the model when the page hasn't changed in a way that matters since the last summary (same
  * settings, same text and title once numbers and times are taken out, same page fields).
- * Returns the saved insight: { summary, status, manual?, engine, at, checkedAt, stale?, reason, readable }.
+ * Returns the saved insight: { summary, status, manual?, engine, at, checkedAt, stale?, reason, readable },
+ * or the saved one unchanged (null if none) when the tab isn't loaded: see notReady.
  */
 export async function summarizeTab(tab, opts = {}) {
   const { st, plan, engine, engineErr, page, instructions, fieldInfo, cfg, csig, fsig, prev, sameCfg, sameContent } = await prepareTab(tab, opts);
+  // The page isn't loaded, so there is nothing to read. Summarizing the title alone would replace a good
+  // summary with "page text unreadable": keep what is saved, and summarize once the tab loads.
+  if (notReady(tab, page)) return prev?.summary ? prev : null;
   if (!engine && !fieldInfo?.status) throw engineErr;
   if (!opts.force && prev?.summary && sameCfg && sameContent) return putInsight(page.url, { cfg, csig, fsig, stale: undefined }, { written: false });
   // reuse: the page is open in several groups; keep its summary while the page is the same, even if this

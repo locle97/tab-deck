@@ -6,7 +6,7 @@
 import * as AI from './lib/ai.js';
 import {
   groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_CODE_MODEL, CLAUDE_CODE_MODEL_RE, claudeCodeInstallCommand, CLOUDS, cloudOf, cloudConsent, usageSummary, USAGE_PROVIDERS, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
-  effectiveStatus, normalizeStatus, rollupStatus, staleCheck, addMark, stableTitle, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
+  effectiveStatus, normalizeStatus, rollupStatus, staleCheck, addMark, stableTitle, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, notLoaded, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
 import { getTabStrip, saveTabStrip } from './lib/tab-strip.js';
@@ -33,10 +33,11 @@ let ctx = null;
 let state = { settings: AI.DEFAULT_SETTINGS, hasKey: false, local: 'unavailable', localApi: null, access: false };
 
 /* ---------- per-tab work queue ---------- */
-const queue = [];            // [{ tabId, force }]
+const queue = [];            // [{ tabId, force, wake }]
 const queued = new Set();    // tab ids waiting
 const busy = new Set();      // tab ids running
 const tabErrors = new Map(); // tab id -> message
+const waking = new Set();    // tab ids being loaded so they can be read (see wakeTab)
 const waiters = new Map();   // tab id -> [resolve]
 const groupRuns = new Map(); // group id -> { status, text, statusText, progress, error, code, ctrl }
 let workers = 0;
@@ -100,6 +101,7 @@ export function tabLine(t) {
   return `<span class="ai-line" data-ai-tab="${t.id}">${tabLineInner(t)}</span>`;
 }
 function tabLineInner(t) {
+  if (waking.has(t.id)) return '<span class="ai-spin" aria-hidden="true"></span><span class="ai-dim">Loading the tab to read it…</span>';
   if (busy.has(t.id)) return '<span class="ai-spin" aria-hidden="true"></span><span class="ai-dim">Summarizing…</span>';
   if (tabErrors.has(t.id)) return `<span class="ai-bad">${esc(tabErrors.get(t.id))}</span>`;
   const ins = AI.tabInsight(urlOf(t));
@@ -112,6 +114,7 @@ function tabLineInner(t) {
     return `<span class="ai-sum${other}" title="${esc(why)}\n${esc(meta)}">${esc(ins.summary)}</span>`;
   }
   if (queued.has(t.id)) return '<span class="ai-dim">Waiting to summarize…</span>';
+  if (notLoaded(t) && isReadableUrl(urlOf(t))) return '<span class="ai-dim" title="Chrome hasn’t loaded this tab yet. Summarize loads it, reads it and puts it back to sleep.">Not loaded yet</span>';
   return '';
 }
 
@@ -357,20 +360,25 @@ function start(kind, id, { force = false } = {}) {
   if (engine === 'cloud' && !cloudConsent(s)) return askCloudConsent(kind, () => start(kind, id, { force }));
   if (kind === 'tab') {
     tabErrors.delete(id);
-    enqueue(id, true, true);
+    enqueue(id, true, true, true);
   } else runGroup(id, force);
 }
 
-function enqueue(tabId, force = false, front = false) {
+/**
+ * Queue a tab to summarize. `wake`: you asked for it (a click), so a tab Chrome hasn't loaded is loaded
+ * to read it, then put back to sleep. Without it (automatic refresh) such a tab keeps its summary.
+ */
+function enqueue(tabId, force = false, front = false, wake = false) {
   if (busy.has(tabId)) return new Promise(r => addWaiter(tabId, r));
   const p = new Promise(r => addWaiter(tabId, r));
   if (queued.has(tabId)) {
     const i = queue.findIndex(q => q.tabId === tabId);
     if (force && i >= 0) queue[i].force = true;
+    if (wake && i >= 0) queue[i].wake = true;
     return p;
   }
   queued.add(tabId);
-  front ? queue.unshift({ tabId, force }) : queue.push({ tabId, force });
+  front ? queue.unshift({ tabId, force, wake }) : queue.push({ tabId, force, wake });
   paintTab(tabId);
   pump();
   return p;
@@ -400,7 +408,7 @@ function sharedPage(t) {
   return owners.size > 1;
 }
 
-async function runTab({ tabId, force }) {
+async function runTab({ tabId, force, wake }) {
   const x = ctx.tabById(tabId);
   if (!x) { settle(tabId); return; }
   // A page shared by several groups keeps its summary while the page itself hasn't changed.
@@ -408,17 +416,50 @@ async function runTab({ tabId, force }) {
   busy.add(tabId);
   tabErrors.delete(tabId);
   paintTab(tabId);
+  let tab = x.t, slept = false;
   try {
-    await AI.summarizeTab(x.t, { force, reuse, access: state.access, groupName: x.owner?.name ?? null });
+    if (wake && state.access && isReadableUrl(urlOf(tab)) && (notLoaded(tab) || tab.status !== 'complete')) {
+      slept = notLoaded(tab);
+      tab = await wakeTab(tabId, slept);
+    }
+    // Still not loaded (it failed to load in time): summarizeTab keeps the saved summary.
+    await AI.summarizeTab(tab, { force, reuse, access: state.access, groupName: x.owner?.name ?? null });
     marks.delete(tabId);
   } catch (e) {
     if (e?.name !== 'AbortError') { console.warn('Summary failed', e); tabErrors.set(tabId, e?.message || String(e)); }
   }
+  // It was asleep before we loaded it: put it back to sleep, unless you opened it meanwhile.
+  if (slept) await chrome.tabs.get(tabId).then(t => (t.active ? null : chrome.tabs.discard(tabId))).catch(() => {});
   busy.delete(tabId);
   if (state.local !== 'available') refreshState();
   paintTab(tabId);
   paintNext();
   settle(tabId);
+}
+
+const LOAD_TIMEOUT = 20 * 1000;
+/**
+ * Load a tab Chrome hasn't loaded (asleep, or restored after a restart and not opened yet) or wait for
+ * one that is still loading, so its text can be read. Resolves with the tab as it is then, loaded or not.
+ */
+async function wakeTab(tabId, reload) {
+  waking.add(tabId);
+  paintTab(tabId);
+  try {
+    const loaded = new Promise(resolve => {
+      const timer = setTimeout(done, LOAD_TIMEOUT);
+      function done() { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(on); resolve(); }
+      function on(id, info) { if (id === tabId && info.status === 'complete') done(); }
+      chrome.tabs.onUpdated.addListener(on);
+      // It may have finished loading before the listener was added.
+      chrome.tabs.get(tabId).then(t => { if (!notLoaded(t) && t.status === 'complete') done(); }, done);
+    });
+    if (reload) await chrome.tabs.reload(tabId).catch(() => {});
+    await loaded;
+    return await chrome.tabs.get(tabId);
+  } finally {
+    waking.delete(tabId);
+  }
 }
 
 async function runGroup(id, force) {
@@ -436,7 +477,7 @@ async function runGroup(id, force) {
     run.statusText = `Summarizing tabs: 0 of ${tabs.length}`;
     paint();
     // Summarize again redoes the group's own tabs, not pages it shares with another group (see sharedPage).
-    await Promise.all(tabs.map(t => enqueue(t.id, force && !sharedPage(t)).then(() => { done++; run.statusText = `Summarizing tabs: ${done} of ${tabs.length}`; paint(); })));
+    await Promise.all(tabs.map(t => enqueue(t.id, force && !sharedPage(t), false, true).then(() => { done++; run.statusText = `Summarizing tabs: ${done} of ${tabs.length}`; paint(); })));
     if (run.ctrl.signal.aborted) throw new DOMException('Stopped', 'AbortError');
     const live = ctx.groupById(id) || g;
     await AI.summarizeGroup({ name: live.name, tabs: live.tabs }, {
@@ -478,6 +519,7 @@ function mark(tabId, reason) {
 
 function watchTabs() {
   chrome.tabs.onUpdated.addListener((id, info) => {
+    if (waking.has(id)) return; // Tab Desk is loading it to read it: not a change in the page
     if (info.url) mark(id, 'nav');
     else if (info.status === 'loading') mark(id, 'reload');
     if (info.title != null) {
