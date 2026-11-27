@@ -68,7 +68,7 @@ if [ -z "$NODE" ]; then
   echo "Node.js 18 or later is needed for the helper, and \`node\` isn’t on your PATH. Install it from https://nodejs.org and run this again." >&2
   exit 1
 fi
-NODE_MAJOR=$("$NODE" -p 'process.versions.node.split(".")[0]')
+NODE_MAJOR=$("$NODE" -p 'parseInt(process.versions.node)')
 if [ "$NODE_MAJOR" -lt 18 ]; then
   echo "The helper needs Node.js 18 or later; $NODE is $("$NODE" --version)." >&2
   exit 1

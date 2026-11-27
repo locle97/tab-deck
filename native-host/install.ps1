@@ -45,7 +45,7 @@ if (-not $node) {
   Write-Error 'Node.js 18 or later is needed for the helper, and `node` is not on your PATH. Install it from https://nodejs.org and run this again.'
 }
 $nodePath = $node.Source
-$major = [int](& $nodePath -p 'process.versions.node.split(".")[0]')
+$major = [int](& $nodePath -p 'parseInt(process.versions.node)')
 if ($major -lt 18) { Write-Error "The helper needs Node.js 18 or later; $nodePath is $(& $nodePath --version)." }
 
 $claude = $null
