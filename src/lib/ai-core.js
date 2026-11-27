@@ -622,7 +622,7 @@ export function geminiRequest({ model, system, user, json = false }) {
 /** Feed SSE text in; returns {texts, rest, blocked}. Keep `rest` for the next call. */
 export function parseSse(buffer) {
   const texts = [];
-  let blocked = null;
+  let blocked = null, usage = null;
   const lines = buffer.split('\n');
   const rest = lines.pop();
   for (const line of lines) {
@@ -634,8 +634,14 @@ export function parseSse(buffer) {
     const c = j.candidates?.[0];
     if (c?.finishReason === 'SAFETY' || c?.finishReason === 'PROHIBITED_CONTENT') blocked = c.finishReason;
     for (const p of c?.content?.parts || []) if (p.text && !p.thought) texts.push(p.text);
+    // Each chunk repeats the running totals; the last one wins.
+    if (j.usageMetadata) usage = {
+      input: j.usageMetadata.promptTokenCount || 0,
+      output: (j.usageMetadata.candidatesTokenCount || 0) + (j.usageMetadata.thoughtsTokenCount || 0),
+      cacheRead: j.usageMetadata.cachedContentTokenCount || 0,
+    };
   }
-  return { texts, rest, blocked };
+  return { texts, rest, blocked, usage };
 }
 
 /** Turn a failed Gemini response into a short message for people. */
@@ -700,7 +706,7 @@ export function claudeRequest({ model, system, user, json = false }) {
 /** Feed Claude SSE text in; returns {texts, rest, blocked, error}. Keep `rest` for the next call. */
 export function parseClaudeSse(buffer) {
   const texts = [];
-  let blocked = null, error = null;
+  let blocked = null, error = null, usage = null;
   const lines = buffer.split('\n');
   const rest = lines.pop();
   for (const line of lines) {
@@ -708,11 +714,19 @@ export function parseClaudeSse(buffer) {
     if (!m || !m[1]) continue;
     let j;
     try { j = JSON.parse(m[1]); } catch { continue; }
+    // Input tokens come in message_start, output tokens (running total) in message_delta.
+    const u = j.type === 'message_start' ? j.message?.usage : j.type === 'message_delta' ? j.usage : null;
+    if (u) {
+      usage ||= {};
+      for (const [k, f] of [['input', 'input_tokens'], ['output', 'output_tokens'], ['cacheRead', 'cache_read_input_tokens'], ['cacheWrite', 'cache_creation_input_tokens']]) {
+        if (Number.isFinite(u[f])) usage[k] = u[f];
+      }
+    }
     if (j.type === 'content_block_delta' && j.delta?.type === 'text_delta' && j.delta.text) texts.push(j.delta.text);
     else if (j.type === 'message_delta' && j.delta?.stop_reason === 'refusal') blocked = 'refusal';
     else if (j.type === 'error') error = { type: j.error?.type || 'error', message: j.error?.message || '' };
   }
-  return { texts, rest, blocked, error };
+  return { texts, rest, blocked, error, usage };
 }
 
 /** Turn a failed Claude API response into a short message for people. retryAfter: the retry-after header. */
@@ -773,6 +787,61 @@ export function claudeCodeInstallCommand(os, extId) {
   return os === 'win'
     ? `powershell -ExecutionPolicy Bypass -File native-host\\install.ps1 -ExtensionId ${extId}`
     : `./native-host/install.sh ${extId}`;
+}
+
+/* ---------- usage ---------- */
+// Every model call adds to a per-day, per-provider tally kept on this device (Settings › Usage).
+// Providers: 'local' (on-device), 'gemini', 'claude' (API) and 'claudecode'.
+
+export const USAGE_DAYS = 90;
+export const USAGE_PROVIDERS = ['claudecode', 'claude', 'gemini', 'local'];
+const USAGE_FIELDS = ['calls', 'errors', 'input', 'output', 'cacheRead', 'cacheWrite', 'costUsd', 'ms'];
+
+/** The local calendar day of a time, as YYYY-MM-DD. */
+export function dayKey(t = Date.now()) {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Add one call to the tally. rec: { provider, ok, input?, output?, cacheRead?, cacheWrite?, costUsd?, ms? }.
+ * Returns a new store with days older than USAGE_DAYS dropped. store: { [day]: { [provider]: totals } }.
+ */
+export function addUsage(store, rec, now = Date.now()) {
+  const out = { ...(store && typeof store === 'object' ? store : {}) };
+  const day = dayKey(now);
+  const p = USAGE_PROVIDERS.includes(rec?.provider) ? rec.provider : null;
+  if (!p) return out;
+  const cur = { ...Object.fromEntries(USAGE_FIELDS.map(f => [f, 0])), ...(out[day]?.[p] || {}) };
+  cur.calls += 1;
+  if (!rec.ok) cur.errors += 1;
+  for (const f of USAGE_FIELDS.slice(2)) { const v = +rec[f]; if (Number.isFinite(v) && v > 0) cur[f] += v; }
+  out[day] = { ...(out[day] || {}), [p]: cur };
+  const oldest = dayKey(now - (USAGE_DAYS - 1) * 864e5);
+  for (const d of Object.keys(out)) if (d < oldest) delete out[d];
+  return out;
+}
+
+/**
+ * Totals for the last `days` days (1 = today), per provider and overall, plus one row per day.
+ * Returns { providers: { [p]: totals }, total, daily: [{ day, calls, tokens }] } (oldest day first).
+ */
+export function usageSummary(store, days, now = Date.now()) {
+  const zero = () => Object.fromEntries(USAGE_FIELDS.map(f => [f, 0]));
+  const providers = {}, total = zero(), daily = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const day = dayKey(now - i * 864e5);
+    const row = { day, calls: 0, tokens: 0 };
+    for (const [p, t] of Object.entries(store?.[day] || {})) {
+      if (!USAGE_PROVIDERS.includes(p)) continue;
+      providers[p] ||= zero();
+      for (const f of USAGE_FIELDS) { providers[p][f] += +t[f] || 0; total[f] += +t[f] || 0; }
+      row.calls += +t.calls || 0;
+      row.tokens += (+t.input || 0) + (+t.output || 0) + (+t.cacheRead || 0) + (+t.cacheWrite || 0);
+    }
+    daily.push(row);
+  }
+  return { providers, total, daily };
 }
 
 /* ---------- cache ---------- */

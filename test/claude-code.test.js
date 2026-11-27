@@ -9,7 +9,7 @@ import {
   normalizeSettings, cloudModel, consentKey, cloudConsent, cloudReady, CLOUDS, cloudOf, chooseEngine,
   claudeCodeRequest, claudeCodeError, claudeCodeInstallCommand, CLAUDE_CODE_HOST, DEFAULT_CLAUDE_CODE_MODEL,
 } from '../src/lib/ai-core.js';
-import { encode, decode, classify, claudeArgs } from '../native-host/tab-desk-claude-host.mjs';
+import { encode, decode, classify, claudeArgs, usageOf } from '../native-host/tab-desk-claude-host.mjs';
 
 const HOST = join(dirname(fileURLToPath(import.meta.url)), '..', 'native-host', 'tab-desk-claude-host.mjs');
 
@@ -67,7 +67,7 @@ test('host: native messaging framing round-trips, including split chunks and uni
 
 test('host: runs claude with no tools, no MCP servers, no saved session and the system prompt in a file', () => {
   const args = claudeArgs({ model: 'haiku', systemFile: '/tmp/s.txt' });
-  assert.deepEqual(args.slice(0, 5), ['-p', '--model', 'haiku', '--output-format', 'json']);
+  assert.deepEqual(args.slice(0, 7), ['-p', '--model', 'haiku', '--effort', 'low', '--output-format', 'json']);
   assert.equal(args[args.indexOf('--tools') + 1], '');
   assert.ok(args.includes('--strict-mcp-config') && args.includes('--no-session-persistence'));
   assert.equal(args[args.indexOf('--system-prompt-file') + 1], '/tmp/s.txt');
@@ -117,7 +117,8 @@ process.stdin.on('data', d => input += d).on('end', () => {
   const sys = fs.readFileSync(args[args.indexOf('--system-prompt-file') + 1], 'utf8');
   fs.writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ args, sys, input, cwd: process.cwd() }));
   if (/signed-out/.test(input)) { console.log(JSON.stringify({ type: 'result', is_error: true, result: 'Not logged in · Please run /login' })); return; }
-  console.log(JSON.stringify({ type: 'result', is_error: false, result: '{"summary":"Fake answer."}', modelUsage: { 'claude-haiku-5-5': {} } }));
+  console.log(JSON.stringify({ type: 'result', is_error: false, result: '{"summary":"Fake answer."}', modelUsage: { 'claude-haiku-5-5': {} },
+    usage: { input_tokens: 5, output_tokens: 40, cache_read_input_tokens: 600, cache_creation_input_tokens: 2700 }, total_cost_usd: 0.0006, duration_ms: 3100 }));
 });
 `);
   chmodSync(fake, 0o755);
@@ -128,7 +129,8 @@ process.stdin.on('data', d => input += d).on('end', () => {
     { id: 4, type: 'bogus' },
   ], { TABDESK_CLAUDE: fake });
   assert.deepEqual(res[0], { id: 1, ok: true, version: '1.0.0', claude: { path: fake, version: '9.9.9 (Claude Code)' } });
-  assert.deepEqual(res[1], { id: 2, ok: true, text: '{"summary":"Fake answer."}', model: 'claude-haiku-5-5' });
+  assert.deepEqual(res[1], { id: 2, ok: true, text: '{"summary":"Fake answer."}', model: 'claude-haiku-5-5',
+    usage: { input: 5, output: 40, cacheRead: 600, cacheWrite: 2700, costUsd: 0.0006, ms: 3100 } });
   assert.equal(res[2].code, 'model');
   assert.equal(res[3].code, 'bad-request');
   const s = JSON.parse(readFileSync(seen, 'utf8'));
@@ -147,4 +149,10 @@ process.stdin.on('data', d => input += d).on('end', () => {
   if (none.ok) return;
   assert.equal(none.code, 'no-cli');
   assert.match(none.message, /can’t find Claude Code/);
+});
+
+test('host: usageOf reads tokens, cost and time from claude -p JSON, and tolerates missing fields', () => {
+  assert.deepEqual(usageOf({}), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, ms: 0 });
+  assert.deepEqual(usageOf({ usage: { input_tokens: 2, output_tokens: 9 }, total_cost_usd: 0.001, duration_ms: 1200.4 }),
+    { input: 2, output: 9, cacheRead: 0, cacheWrite: 0, costUsd: 0.001, ms: 1200 });
 });
