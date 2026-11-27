@@ -167,7 +167,9 @@ test('sentence prompt: facts and status are given, the AI only writes the senten
   assert.match(system, /untrusted/);
   assert.match(user, /State: state: Open\nStatus: Need action/);
   assert.ok(user.length < 2000);
-  assert.equal(templateSentence({ title: 'Fix it', facts: 'state: Open' }), 'Fix it · state: Open');
+  assert.match(system, /says why the tab is "Need action"/);
+  assert.equal(templateSentence({ title: 'Fix it', facts: 'state: Open' }), 'state: Open · Fix it');
+  assert.equal(templateSentence({ title: 'Fix it', facts: '' }), 'Fix it');
   const req = geminiRequest({ model: 'm', system, user, json: 'sentence' });
   assert.deepEqual(req.body.generationConfig.responseSchema.required, ['summary']);
 });

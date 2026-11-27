@@ -501,7 +501,7 @@ try {
   assert.ok(f.headers['anthropic-version']);
   assert.equal(f.body.model, 'claude-haiku-5-5');
   assert.equal(f.body.stream, true);
-  assert.deepEqual(f.body.output_config.format.schema.required, ['facts', 'summary', 'status']);
+  assert.deepEqual(f.body.output_config.format.schema.required, ['facts', 'status', 'summary']);
   assert.match(f.body.messages[0].content, /purple-otter/);
   // Group sentence from Claude too, labeled as Claude.
   await page.click('[data-act=ai-group]');

@@ -293,16 +293,28 @@ test('summary line under each tab is off by default', () => {
   assert.equal(normalizeSettings({ tabLines: true }).tabLines, true);
 });
 
-test('summary and status come from one analysis: facts first, then summary, then status', () => {
-  assert.deepEqual(Object.keys(INSIGHT_SCHEMA.properties), ['facts', 'summary', 'status']);
+test('summary and status come from one analysis: facts first, then status, then the summary that explains it', () => {
+  assert.deepEqual(Object.keys(INSIGHT_SCHEMA.properties), ['facts', 'status', 'summary']);
   const g = geminiRequest({ model: 'm', system: 's', user: 'u', json: true }).body.generationConfig.responseSchema;
-  assert.deepEqual(g.propertyOrdering, ['facts', 'summary', 'status']);
+  assert.deepEqual(g.propertyOrdering, ['facts', 'status', 'summary']);
+  assert.deepEqual(g.required, ['facts', 'status', 'summary']);
   const p = tabPrompt({ title: 'Fix login · Pull Request #5', url: 'https://github.com/a/b/pull/5', text: 'Page state: Merged\n\nbody' });
   const all = (p.system + '\n' + p.user).toLowerCase();
   assert.match(all, /facts/);
   assert.match(all, /page state/);
   assert.match(all, /agree/);
-  assert.ok(PROMPT_VERSION >= 3);
+  assert.ok(PROMPT_VERSION >= 7);
+});
+
+test('the summary explains the status with a concrete fact, not a page description', () => {
+  const base = baseTabPrompt('en');
+  assert.match(base, /"summary": why the tab has that status/);
+  assert.match(base, /at most 15 words/);
+  assert.match(base, /concrete fact that explains the status, not what the page is/);
+  assert.match(base, /Needs you to create the D1 database/);
+  assert.match(DEFAULT_TAB_INSTRUCTIONS, /Summary: the concrete fact that explains the status/);
+  assert.match(localContext('tab'), /concrete fact/);
+  assert.doesNotMatch(localContext('tab'), /what it is\.$/);
 });
 
 test('parseInsight keeps short facts; headTail keeps both ends of long pages', () => {
@@ -318,9 +330,9 @@ test('parseInsight keeps short facts; headTail keeps both ends of long pages', (
   assert.equal(headTail('short', 6000), 'short');
 });
 
-test('tab prompt = fixed base (JSON facts, summary, status) + one set of instructions, default when none', () => {
+test('tab prompt = fixed base (JSON facts, status, summary) + one set of instructions, default when none', () => {
   const base = baseTabPrompt('en');
-  assert.match(base, /Reply with JSON only, in this order: \{"facts": "\.\.\.", "summary": "\.\.\.", "status": "\.\.\."\}/);
+  assert.match(base, /Reply with JSON only, in this order: \{"facts": "\.\.\.", "status": "\.\.\.", "summary": "\.\.\."\}/);
   const d = tabPrompt({ title: 't', url: 'u', text: 'x' }).system;
   assert.ok(d.startsWith(base));
   assert.ok(d.includes(DEFAULT_TAB_INSTRUCTIONS));

@@ -50,7 +50,7 @@ test('claudeRequest streams with thinking off and asks for JSON with a closed sc
   const f = r.body.output_config.format;
   assert.equal(f.type, 'json_schema');
   assert.equal(f.schema.additionalProperties, false);
-  assert.deepEqual(f.schema.required, ['facts', 'summary', 'status']);
+  assert.deepEqual(f.schema.required, ['facts', 'status', 'summary']);
   assert.ok(f.schema.properties.status.enum.includes('unknown'));
   assert.equal(r.body.temperature, undefined, 'API version 2026-10-21 rejects sampling parameters');
   const s = claudeRequest({ model: 'm', system: 's', user: 'u', json: 'sentence' }).body.output_config.format.schema;
