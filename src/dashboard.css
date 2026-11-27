@@ -16,6 +16,8 @@
   /* Chrome tab group colors, light */
   --g-grey: #5f6368; --g-blue: #1a73e8; --g-red: #d93025; --g-yellow: #e8a200;
   --g-green: #188038; --g-pink: #d01884; --g-purple: #a142f4; --g-cyan: #007b83; --g-orange: #e8710a;
+  /* How much of the group color goes into a card header (the rest is the surface). */
+  --head-mix: 30%;
   --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -26,6 +28,7 @@
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
     --g-grey: #bdc1c6; --g-blue: #8ab4f8; --g-red: #f28b82; --g-yellow: #fdd663;
     --g-green: #81c995; --g-pink: #ff8bcb; --g-purple: #c58af9; --g-cyan: #78d9ec; --g-orange: #fcad70;
+    --head-mix: 34%;
     color-scheme: dark;
   }
 }
@@ -35,6 +38,7 @@
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
   --g-grey: #bdc1c6; --g-blue: #8ab4f8; --g-red: #f28b82; --g-yellow: #fdd663;
   --g-green: #81c995; --g-pink: #ff8bcb; --g-purple: #c58af9; --g-cyan: #78d9ec; --g-orange: #fcad70;
+  --head-mix: 34%;
   color-scheme: dark;
 }
 
@@ -220,30 +224,28 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .dash.is-list .card-tabs { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); column-gap: 12px; }
 
 /* Card hierarchy: 1 name + status pill (the only bold text), 2 summary line, 3 tab rows, 4 footer. */
-.card { position: relative; display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; transition: border-color .15s, opacity .15s; }
-.card-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px; padding: 6px 8px 6px 14px; background: color-mix(in srgb, var(--c) 12%, var(--surface)); border-bottom: 1px solid color-mix(in srgb, var(--c) 22%, var(--line)); }
+.card { position: relative; display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; transition: opacity .15s; }
+/* The header is a clear tint of the group's Chrome color, so a card matches its tab strip chip at a glance. */
+.card-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px; padding: 6px 8px 6px 14px; background: color-mix(in srgb, var(--c) var(--head-mix), var(--surface)); }
 .card-name { flex: 0 1 auto; min-width: 0; padding: 2px 0; border: 0; background: transparent; font-size: 15px; font-weight: 650; letter-spacing: -.01em; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
-.card-name:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--c, var(--faint)); }
+.card-name:hover { text-decoration: underline; text-underline-offset: 3px; }
+/* Status pill sits on a surface chip so its own color never fights the header color. */
+.card-head .ai-st { background: var(--surface); }
 .card-head .ai-st-wrap { flex: none; }
 .card-head .win-tag { flex: none; }
 /* Right-hand tools (window tag, Summarize, More) never shrink; the name truncates instead. */
 .card-tools { flex: none; display: flex; align-items: center; gap: 2px; margin-left: auto; }
 .card-tools .win-tag { margin-right: 4px; }
-.card-tools [data-act="card-more"] { color: var(--faint); }
-.card-tools [data-act="card-more"]:hover { color: var(--ink); }
+.card-tools .icon-btn, .card-tools .win-tag { color: var(--muted); }
+.card-tools .icon-btn:hover { color: var(--ink); }
 .card-tools .icon-btn { width: 28px; height: 28px; }
-.card-tools .icon-btn:hover { background: var(--surface); }
+.card-tools .icon-btn:hover { background: color-mix(in srgb, var(--ink) 10%, transparent); }
 .btn.sm { padding: 4px 9px; font-size: 12.5px; border-radius: 7px; }
 .btn.sm svg { width: 13px; height: 13px; }
-.st-bar { display: flex; gap: 2px; height: 3px; background: var(--surface); }
-.st-bar i { background: var(--s); min-width: 4px; }
-.st-bar i.st-none { background: var(--line); }
 .card-body { display: flex; flex-direction: column; gap: 4px; padding: 8px 8px 4px 8px; min-width: 0; }
 .card-meta { display: flex; align-items: center; gap: 8px; padding: 6px 14px 8px; font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .card-meta > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-prog { flex: none; color: var(--g-blue); font-weight: 600; }
-/* Cards that need you stand out; finished ones step back. */
-.card.needs-you { border-color: color-mix(in srgb, var(--g-red) 55%, var(--line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--g-red) 30%, transparent), 0 4px 14px -6px color-mix(in srgb, var(--g-red) 40%, transparent); }
 
 /* Tab rows: status as a colored left edge, title then faint site, actions on hover. */
 .card-tabs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -414,9 +416,8 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-stale-tag { font-size: 10.5px; font-weight: 600; color: var(--g-orange); margin-right: 2px; }
 .ai-edge.is-stale { opacity: .45; background: repeating-linear-gradient(180deg, var(--s) 0 4px, transparent 4px 7px); }
 .ai-st.is-stale, .ai-dot-btn.is-stale { opacity: .55; }
-.card-head .ai-card-btn { flex: none; width: 26px; height: 26px; color: var(--faint); }
+.card-head .ai-card-btn { flex: none; width: 26px; height: 26px; }
 .card-head .ai-card-btn svg { width: 15px; height: 15px; }
-.card-head .ai-card-btn:hover { color: var(--ink); background: var(--surface); }
 .ai-card-btn.is-busy svg { animation: edgepulse 1s ease-in-out infinite; }
 .ai-every { max-width: 200px; }
 .ai-next-wrap:empty { display: none; }
