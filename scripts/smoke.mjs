@@ -368,6 +368,35 @@ try {
   assert.equal(await panel.isVisible('.card[data-card]'), true, 'the panel stays on its dashboard');
   step('side panel opens the full dashboard, on a group when you click its name');
 
+  // Settings → Tab strip: collapse the other groups when you switch to a grouped tab.
+  const stripState = () => sw.evaluate(async () => (await chrome.tabGroups.query({})).map(g => ({ id: g.id, collapsed: g.collapsed })));
+  const expandAll = () => sw.evaluate(async () => { for (const g of await chrome.tabGroups.query({})) await chrome.tabGroups.update(g.id, { collapsed: false }); });
+  const activateIn = gi => sw.evaluate(async i => {
+    const gs = (await chrome.tabGroups.query({})).sort((a, b) => a.id - b.id);
+    const t = (await chrome.tabs.query({ groupId: gs[i].id }))[0];
+    await chrome.tabs.update(t.id, { active: true });
+    return gs[i].id;
+  }, gi);
+  await expandAll();
+  await activateIn(1);
+  await page.waitForTimeout(300);
+  assert.ok((await stripState()).every(g => !g.collapsed), 'off by default: switching leaves groups open');
+  await page.bringToFront();
+  await page.click('#settingsBtn');
+  await page.click('#setTab-general');
+  assert.equal(await page.isChecked('#stripCollapseOthers'), false);
+  await page.check('#stripCollapseOthers');
+  await page.click('[data-m=ok]');
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
+  await expandAll();
+  const activeG = await activateIn(0);
+  let st = [];
+  for (let k = 0; k < 30; k++) { st = await stripState(); if (st.some(g => g.collapsed)) break; await page.waitForTimeout(100); }
+  for (const g of st) assert.equal(g.collapsed, g.id !== activeG, `group ${g.id} collapsed only if it isn't the active tab's group`);
+  await sw.evaluate(() => chrome.storage.local.set({ tabStripSettings: { collapseOthers: false } }));
+  await expandAll();
+  step('tab strip setting collapses the other groups when switching to a grouped tab');
+
   // With no Tab Desk tab open, the button opens one.
   await page.close();
   await panel.click('[data-act=open-full]');

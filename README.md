@@ -21,6 +21,7 @@ A Chrome extension page for people who keep many tab groups open. It replaces sq
   - With *Most urgent* or *Recently used*, cards and the tabs in them aren't in tab strip order, so a drop that sets an order switches the dashboard to *Tab strip order* to show the result.
 - **Group detail.** The selected group's tabs with favicon, title, URL and badges (Active, Playing, Duplicate, Sleeping, Pinned). Rename, recolor, sort by site, collapse, ungroup, move or close tabs, alone or several at once.
 - **Switch to group.** Expands the group, collapses the other groups in that window and opens its most recent tab.
+- **Tidy tab strip (optional).** In **Settings** → *General* → *Tab strip*, turn on *Collapse other groups when I switch to a tab in a group* to keep only the active tab's group open in Chrome's tab bar. It applies however you switch (clicking in the tab bar, a shortcut or Tab Desk), only in that window, and switching to an ungrouped tab leaves the groups alone. Off by default.
 - **Workspaces.** *Save & close* stores a group (name, color, URLs) and closes its tabs. *Restore* reopens it as a group later.
 - **Command palette.** `Ctrl+K` (`⌘K` on Mac) on the Tab Desk page searches tabs, groups and workspaces:
   - `Enter` switches to a tab, shows a group, or restores a workspace
@@ -57,12 +58,13 @@ No build step. The code is plain ES modules:
 | Path | What it does |
 | --- | --- |
 | `src/manifest.json` | Manifest V3 |
-| `src/background.js` | Makes the toolbar icon open the side panel; opens or focuses the full Tab Desk page |
+| `src/background.js` | Makes the toolbar icon open the side panel; opens or focuses the full Tab Desk page; collapses other groups on tab switch when that setting is on |
 | `src/dashboard.html`, `.css`, `.js` | The Tab Desk page |
 | `src/panel.html` | The side panel: the same page and code in a compact, dashboard-only mode |
 | `src/lib/model.js` | Pure helpers: building the view model, duplicates, site grouping, fuzzy search |
 | `src/lib/actions.js` | Every change made to real tabs, each returning an undo function |
 | `src/lib/workspaces.js` | Saved workspaces in `chrome.storage.local` |
+| `src/lib/tab-strip.js` | Tab strip settings and which groups to collapse when you switch tabs |
 | `src/lib/fields.js` | Pure helpers for page fields and status rules: parsing, deciding the status, built-in GitHub presets |
 | `src/lib/ai-core.js` | Pure AI helpers: settings, instructions, engine choice, prompts, Gemini and Claude requests and stream parsing, safe Markdown rendering |
 | `src/lib/ai.js` | AI engines: on-device Summarizer API, Gemini API, Claude API, page text extraction, cache |
