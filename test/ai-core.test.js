@@ -5,7 +5,7 @@ import {
   tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, cacheKey, pruneCache, renderSummary,
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
   effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, staleCheck, addMark, nextRefreshAt, stableTitle, stableText, contentSig, REFRESH, EVERY_DEFAULT, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
-  pickInstructions, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
+  pickInstructions, previousBlock, tabUserText, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   mergeRemote, migrateInsightStatuses,
 } from '../src/lib/ai-core.js';
 
@@ -293,16 +293,28 @@ test('summary line under each tab is off by default', () => {
   assert.equal(normalizeSettings({ tabLines: true }).tabLines, true);
 });
 
-test('summary and status come from one analysis: facts first, then summary, then status', () => {
-  assert.deepEqual(Object.keys(INSIGHT_SCHEMA.properties), ['facts', 'summary', 'status']);
+test('summary and status come from one analysis: facts first, then status, then the summary that explains it', () => {
+  assert.deepEqual(Object.keys(INSIGHT_SCHEMA.properties), ['facts', 'status', 'summary']);
   const g = geminiRequest({ model: 'm', system: 's', user: 'u', json: true }).body.generationConfig.responseSchema;
-  assert.deepEqual(g.propertyOrdering, ['facts', 'summary', 'status']);
+  assert.deepEqual(g.propertyOrdering, ['facts', 'status', 'summary']);
+  assert.deepEqual(g.required, ['facts', 'status', 'summary']);
   const p = tabPrompt({ title: 'Fix login · Pull Request #5', url: 'https://github.com/a/b/pull/5', text: 'Page state: Merged\n\nbody' });
   const all = (p.system + '\n' + p.user).toLowerCase();
   assert.match(all, /facts/);
   assert.match(all, /page state/);
   assert.match(all, /agree/);
-  assert.ok(PROMPT_VERSION >= 3);
+  assert.ok(PROMPT_VERSION >= 7);
+});
+
+test('the summary explains the status with a concrete fact, not a page description', () => {
+  const base = baseTabPrompt('en');
+  assert.match(base, /"summary": why the tab has that status/);
+  assert.match(base, /at most 15 words/);
+  assert.match(base, /concrete fact that explains the status, not what the page is/);
+  assert.match(base, /Needs you to create the D1 database/);
+  assert.match(DEFAULT_TAB_INSTRUCTIONS, /Summary: the concrete fact that explains the status/);
+  assert.match(localContext('tab'), /concrete fact/);
+  assert.doesNotMatch(localContext('tab'), /what it is\.$/);
 });
 
 test('parseInsight keeps short facts; headTail keeps both ends of long pages', () => {
@@ -318,9 +330,9 @@ test('parseInsight keeps short facts; headTail keeps both ends of long pages', (
   assert.equal(headTail('short', 6000), 'short');
 });
 
-test('tab prompt = fixed base (JSON facts, summary, status) + one set of instructions, default when none', () => {
+test('tab prompt = fixed base (JSON facts, status, summary) + one set of instructions, default when none', () => {
   const base = baseTabPrompt('en');
-  assert.match(base, /Reply with JSON only, in this order: \{"facts": "\.\.\.", "summary": "\.\.\.", "status": "\.\.\."\}/);
+  assert.match(base, /Reply with JSON only, in this order: \{"facts": "\.\.\.", "status": "\.\.\.", "summary": "\.\.\."\}/);
   const d = tabPrompt({ title: 't', url: 'u', text: 'x' }).system;
   assert.ok(d.startsWith(base));
   assert.ok(d.includes(DEFAULT_TAB_INSTRUCTIONS));
@@ -367,4 +379,24 @@ test('migrateInsightStatuses rewrites saved Done and Waiting statuses, AI-set an
   assert.deepEqual(map.a, { status: 'idle', manual: 'working' });
   assert.deepEqual(map.b, { status: 'action' });
   assert.equal(migrateInsightStatuses(map), false);
+});
+
+test('the previous status and summary go into the tab prompt as context', () => {
+  const now = Date.parse('2026-11-27T10:00:00Z');
+  const prev = { status: 'action', summary: 'Needs you to create the D1 database.', at: now - 3 * 3600e3 };
+  const b = previousBlock(prev, now);
+  assert.match(b, /^Previous analysis of this tab \(written 3 h ago; the page may have changed since\):/);
+  assert.match(b, /Status: Need action\nSummary: Needs you to create the D1 database\./);
+  assert.doesNotMatch(b, /by hand/);
+  assert.match(previousBlock({ ...prev, manual: 'idle' }, now), /set the status to Idle by hand/);
+  assert.match(previousBlock({ status: 'done', summary: 'x', at: now - 60e3 }, now), /1 min ago[\s\S]*Status: Idle/);
+  assert.equal(previousBlock(null), '');
+  assert.equal(previousBlock({ status: 'nope', summary: '  ' }), '');
+  const p = tabPrompt({ title: 'T', url: 'u', text: 'body', previous: b });
+  assert.ok(p.user.startsWith(b + '\n\nTitle: T'));
+  assert.ok(p.user.indexOf('Previous analysis') < p.user.indexOf('<page>'), 'previous analysis sits outside the untrusted page block');
+  assert.match(p.system, /keep its status while the page still supports it/);
+  assert.match(p.system, /The page always wins/);
+  assert.ok(!tabPrompt({ title: 'T', url: 'u', text: 'body' }).user.includes('Previous analysis'));
+  assert.equal(tabUserText({ title: 'T', url: 'u', text: '' }), 'Title: T\nURL: u\n<page>\n(The page text could not be read. Work from the title and URL only.)\n</page>');
 });

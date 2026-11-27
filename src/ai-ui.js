@@ -92,7 +92,7 @@ export function tabSumButton(t) {
 /** Kept for older call sites: tab summaries now show as a line under the title (tabLine). */
 export const tabSumRow = () => '';
 
-/** The one-sentence summary under a tab's title. */
+/** The line under a tab's title: the fact that explains the tab's status. */
 export function tabLine(t) {
   if (!aiEnabled() || !state.settings.tabLines) return '';
   return `<span class="ai-line" data-ai-tab="${t.id}">${tabLineInner(t)}</span>`;
@@ -102,12 +102,26 @@ function tabLineInner(t) {
   if (tabErrors.has(t.id)) return `<span class="ai-bad">${esc(tabErrors.get(t.id))}</span>`;
   const ins = AI.tabInsight(urlOf(t));
   if (ins?.summary) {
-    if (ins.stale) return `<span class="ai-sum is-stale" title="${esc(ins.summary)}\n${esc(STALE)}"><span class="ai-stale-tag">Outdated</span> ${esc(ins.summary)}</span>`;
+    const why = whyLine(ins);
+    if (ins.stale) return `<span class="ai-sum is-stale" title="${esc(why)}\n${esc(STALE)}"><span class="ai-stale-tag">Outdated</span> ${esc(ins.summary)}</span>`;
     const meta = `${writtenLine(ins)}${ins.readable === false ? ' · from the title only' : ''}${ins.facts ? `\n${ins.facts}` : ''}`;
-    return `<span class="ai-sum" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</span>`;
+    // A status set by hand that differs from the AI's: the line still explains the AI's status, so it is dimmed.
+    const other = overridden(ins) ? ' is-other' : '';
+    return `<span class="ai-sum${other}" title="${esc(why)}\n${esc(meta)}">${esc(ins.summary)}</span>`;
   }
   if (queued.has(t.id)) return '<span class="ai-dim">Waiting to summarize…</span>';
   return '';
+}
+
+/** The person changed the status by hand to something other than what the AI's summary explains. */
+const overridden = ins => !!normalizeStatus(ins?.manual) && !!normalizeStatus(ins?.status) && normalizeStatus(ins.manual) !== normalizeStatus(ins.status);
+
+/** "Why Need action: <summary>", naming the status the summary explains (the AI's, or the page fields'). */
+function whyLine(ins) {
+  const s = normalizeStatus(ins?.status);
+  if (!s) return ins?.summary || '';
+  const lead = overridden(ins) ? `Why the AI said ${STATUSES[s].label}` : `Why ${STATUSES[s].label}`;
+  return `${lead}: ${ins.summary}`;
 }
 
 /** A tab's status (set by hand or by the AI), or null. How it is worked out stays in here. */
@@ -139,7 +153,7 @@ function tabStatusInner(t, mode) {
     return compact ? '<span class="ai-spin" title="Summarizing…" aria-label="Summarizing"></span>' : '<span class="ai-st st-none static"><span class="ai-spin" aria-hidden="true"></span>Summarizing…</span>';
   }
   if (!state.settings.tabLines && tabErrors.has(t.id) && !compact) return `<button class="ai-st st-none ai-bad" data-act="ai-status" type="button" title="${esc(tabErrors.get(t.id))}">Couldn’t summarize</button>`;
-  const sum = !state.settings.tabLines && ins?.summary ? `${ins.summary}\n${ins.stale ? STALE : writtenLine(ins)}\n\n` : '';
+  const sum = !state.settings.tabLines && ins?.summary ? `${whyLine(ins)}\n${ins.stale ? STALE : writtenLine(ins)}\n\n` : '';
   const from = ins?.manual ? ' (set by you)' : ins?.statusFrom === 'fields' ? ' (from page fields)' : ' (from AI)';
   const facts = ins?.facts && !ins?.manual ? `\n${ins.facts}` : '';
   const why = sum + (s ? `${label}${from}.${facts}\nClick to change.` : 'No status yet. Click to set one.');

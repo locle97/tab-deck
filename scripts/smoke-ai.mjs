@@ -312,7 +312,11 @@ try {
     const row = [...document.querySelectorAll('.tab')].find(r => r.textContent.includes('/live'));
     return row?.querySelector('.ai-sum') && !row.querySelector('.ai-sum.is-stale');
   });
+  const redo = await page.evaluate(() => window.__ai.calls.filter(c => c.json).at(-1));
+  assert.match(redo.text, /Previous analysis of this tab[\s\S]*Summary: [\s\S]*Title: /, 'the redo gets the previous status and summary before the page');
+  assert.match(redo.text, /\nTitle: [\s\S]*second version/);
   step('a page that changed after its summary is marked Outdated without a model call; Summarize clears it');
+  step('summarizing again sends the previous status and summary as context');
 
   // Leaving a tab you were on summarizes it, so its status is current.
   liveText = 'A third version: the build is running now.';
@@ -501,7 +505,7 @@ try {
   assert.ok(f.headers['anthropic-version']);
   assert.equal(f.body.model, 'claude-haiku-5-5');
   assert.equal(f.body.stream, true);
-  assert.deepEqual(f.body.output_config.format.schema.required, ['facts', 'summary', 'status']);
+  assert.deepEqual(f.body.output_config.format.schema.required, ['facts', 'status', 'summary']);
   assert.match(f.body.messages[0].content, /purple-otter/);
   // Group sentence from Claude too, labeled as Claude.
   await page.click('[data-act=ai-group]');
