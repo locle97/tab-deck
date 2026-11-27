@@ -302,20 +302,6 @@ export function contentSig({ text = '', title = '' } = {}) {
   return fnv(stableText(text)) + fnv(stableTitle(title));
 }
 
-/**
- * Has a group changed since its summary was written? True when one of its tabs is outdated, tabs
- * joined or left it, or a tab's summary is newer than the group's. groupIns.members: the tab addresses it was written from.
- * tabs: [{ url, ins }] for the group's tabs now.
- */
-export function groupOutdated(groupIns, tabs) {
-  if (groupIns?.summary && tabs.some(t => t.ins?.stale)) return true;
-  // Summaries saved before `members` existed can't tell, so they never show as outdated.
-  if (!groupIns?.summary || !Array.isArray(groupIns.members)) return false;
-  const was = new Set(groupIns.members), now = new Set(tabs.map(t => insightKey(t.url)));
-  if (was.size !== now.size || [...now].some(u => !was.has(u))) return true;
-  return tabs.some(t => (t.ins?.at || 0) > (groupIns.at || 0));
-}
-
 /* ---------- engine choice ---------- */
 
 /**

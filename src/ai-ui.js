@@ -6,7 +6,7 @@
 import * as AI from './lib/ai.js';
 import {
   groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, CLOUDS, cloudOf, cloudConsent, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
-  effectiveStatus, rollupStatus, staleCheck, addMark, stableTitle, groupOutdated, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
+  effectiveStatus, rollupStatus, staleCheck, addMark, stableTitle, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
 import { parseFields, parseStatusRules, decideStatus, factsLine, PRESETS } from './lib/fields.js';
@@ -185,9 +185,8 @@ export function groupSumButtons() {
 export function cardSumButton(g) {
   if (!aiEnabled()) return '';
   const run = g && groupRuns.get(g.id)?.status === 'running';
-  const old = g && isOutdated(g);
-  const tip = run ? 'Summarizing…' : old ? `${OUTDATED}` : 'Summarize this group and each of its tabs';
-  return `<button class="icon-btn ai-card-btn${old ? ' is-outdated' : ''}${run ? ' is-busy' : ''}" data-act="ai-group" type="button" title="${esc(tip)}" aria-label="Summarize ${esc(g?.name || 'this group')}"${run ? ' disabled' : ''}>${IC.spark}</button>`;
+  const tip = run ? 'Summarizing…' : 'Summarize this group and each of its tabs';
+  return `<button class="icon-btn ai-card-btn${run ? ' is-busy' : ''}" data-act="ai-group" type="button" title="${esc(tip)}" aria-label="Summarize ${esc(g?.name || 'this group')}"${run ? ' disabled' : ''}>${IC.spark}</button>`;
 }
 
 /** The group's one-sentence summary. `detail` also shows the instructions chip when there's no summary. */
@@ -217,10 +216,9 @@ function groupLineInner(g) {
       <span class="ai-tools always"><button class="link" data-act="${fix}" type="button">${fix === 'ai-settings' ? 'Settings' : 'Try again'}</button></span></div>`;
   }
   if (!ins?.summary) return '';
-  const old = isOutdated(g);
-  const meta = `${engineLabel(ins)} · ${ago(ins.at)}${old ? `\n${OUTDATED}` : ''}`;
-  return `<div class="ai-gline${old ? ' is-outdated' : ''}"><p class="ai-gtext" data-act="ai-expand" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</p>
-    <span class="ai-tools${old ? ' always' : ''}">${old ? `<span class="ai-outdated" title="${esc(OUTDATED)}">Tabs changed</span>` : ''}
+  const meta = `${engineLabel(ins)} · ${ago(ins.at)}`;
+  return `<div class="ai-gline"><p class="ai-gtext" data-act="ai-expand" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</p>
+    <span class="ai-tools">
       <button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${IC.refresh}</button>
       <button class="icon-btn" data-act="ai-instr" type="button" title="AI instructions for this group" aria-label="AI instructions for this group">${IC.note}</button>
     </span></div>`;
@@ -240,7 +238,7 @@ function groupSumInner(g, detail) {
   } else if (ins?.summary) {
     body = `<p class="ai-gtext">${esc(ins.summary)}</p>`;
   }
-  const engine = ins && !running ? `<span class="ai-engine${ins.engine === 'cloud' ? ' cloud' : ''}">${esc(engineLabel(ins))}</span><span class="ai-when">${esc(ago(ins.at))}</span>${isOutdated(g) ? `<span class="ai-outdated" title="${esc(OUTDATED)}">Tabs changed</span>` : ''}` : '';
+  const engine = ins && !running ? `<span class="ai-engine${ins.engine === 'cloud' ? ' cloud' : ''}">${esc(engineLabel(ins))}</span><span class="ai-when">${esc(ago(ins.at))}</span>` : '';
   const tools = running
     ? '<button class="btn ghost sm" data-act="ai-stop" type="button">Stop</button>'
     : `<button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${IC.refresh}</button>
@@ -375,7 +373,7 @@ function pump() {
 /**
  * Is this page open in more than one group? Its summary is saved once per address, so two groups
  * share it. Each group's instructions would give a different summary, and summarizing one group
- * would rewrite the tab under the other and mark that group "Tabs changed", back and forth.
+ * would rewrite the summary of the tab under the other group, back and forth.
  */
 function sharedPage(t) {
   const k = insightKey(urlOf(t));
@@ -584,12 +582,7 @@ function paintGroup(id) {
   });
 }
 
-const OUTDATED = 'Tabs in this group changed since this summary. Summarize again to update it.';
 const STALE = 'Outdated: the page changed since this summary. Summarize again to update it.';
-/** A group summary written before its tabs changed (tabs joined or left, or a tab got a new summary). */
-function isOutdated(g) {
-  return groupOutdated(AI.groupInsight(g.name), g.tabs.map(t => ({ url: urlOf(t), ins: AI.tabInsight(urlOf(t)) })));
-}
 /** "On-device · 2 h ago", plus when the page was last checked if that is later and nothing changed. */
 function writtenLine(ins) {
   const checked = ins.checkedAt && ins.checkedAt - (ins.at || 0) > 60 * 1000 ? ` · checked ${ago(ins.checkedAt)}, no change` : '';

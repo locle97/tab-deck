@@ -779,9 +779,7 @@ export async function summarizeGroup(group, opts = {}) {
   }
   const summary = oneSentence(text, 300);
   if (!summary) throw new AiError('The AI returned an empty summary.', 'empty');
-  // members: every tab it was written from, so the dashboard can say when tabs joined or left (groupOutdated).
-  const members = group.tabs.map(t => insightKey(t.url || t.pendingUrl));
-  groupInsights[groupKey(group.name)] = { summary, engine, ...(engine === 'cloud' ? { cloud: st.settings.cloud } : {}), sig, members, unreadable, skipped, at: Date.now() };
+  groupInsights[groupKey(group.name)] = { summary, engine, ...(engine === 'cloud' ? { cloud: st.settings.cloud } : {}), sig, unreadable, skipped, at: Date.now() };
   dirtyGroups.add(groupKey(group.name));
   scheduleSave();
   emit();

@@ -4,7 +4,7 @@ import {
   normalizeSettings, groupKey, instructionsFor, chooseEngine, cleanText, chunkText, langCode, isReadableUrl,
   tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, cacheKey, pruneCache, renderSummary,
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
-  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, staleCheck, addMark, nextRefreshAt, stableTitle, stableText, contentSig, groupOutdated, REFRESH, EVERY_DEFAULT, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
+  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, staleCheck, addMark, nextRefreshAt, stableTitle, stableText, contentSig, REFRESH, EVERY_DEFAULT, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
   pickInstructions, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   mergeRemote,
 } from '../src/lib/ai-core.js';
@@ -264,18 +264,6 @@ test('contentSig ignores numbers, times and spacing but not words', () => {
   assert.equal(contentSig({ title: '(4) PR #42', text: 'Opened  5 minutes ago 13 comments' }), a);
   assert.notEqual(contentSig({ title: 'PR #42', text: 'Merged 5 minutes ago 13 comments' }), a);
   assert.equal(stableText('At 10:45, 1,234 views'), 'at #, # views');
-});
-
-test('groupOutdated: an outdated tab, tabs joining or leaving, or a newer tab summary', () => {
-  const g = { summary: 'x', at: 100, members: ['https://a.com/', 'https://b.com/'] };
-  const tabs = [{ url: 'https://a.com/#top', ins: { at: 50 } }, { url: 'https://b.com/', ins: { at: 90 } }];
-  assert.equal(groupOutdated(g, tabs), false);
-  assert.equal(groupOutdated(g, [tabs[0], { url: 'https://b.com/', ins: { at: 90, stale: true } }]), true);
-  assert.equal(groupOutdated(g, [...tabs, { url: 'https://c.com/' }]), true);
-  assert.equal(groupOutdated(g, tabs.slice(0, 1)), true);
-  assert.equal(groupOutdated(g, [tabs[0], { url: 'https://b.com/', ins: { at: 150 } }]), true);
-  assert.equal(groupOutdated({ summary: 'x', at: 100 }, [{ url: 'https://c.com/', ins: { at: 150 } }]), false);
-  assert.equal(groupOutdated(null, tabs), false);
 });
 
 test('pruneCache keeps a summary that was checked recently even if written long ago', () => {
