@@ -35,6 +35,7 @@ A Chrome extension page for people who keep many tab groups open. It replaces sq
   - *Summarize* on a group summarizes the group and each of its tabs. The sparkle on a tab summarizes that tab again. With *Summarize tabs automatically* on (the default), new and changed tabs are summarized in the background once the on-device model is ready.
   - Runs on your device by default with Chrome's built-in Gemini Nano (Chrome 138+ on desktop, with enough memory and disk). Chrome downloads the model once, on your first click. Nothing leaves your computer. Statuses use Chrome's Prompt API; where only the Summarizer API is available, on-device summaries come without a status.
   - Optionally use a cloud model with your own API key in **Settings** (bottom of the sidebar) → *General* → *Cloud*: **Gemini API** (key from Google AI Studio) or **Claude Haiku** (`claude-haiku-5-5`, key from the Claude Console). Each key is stored on this device only. Before anything is sent to Google or Anthropic, Tab Desk asks once for that provider, and cloud summaries are marked *Gemini · cloud* or *Claude · cloud*.
+  - Or use **Claude Code (local)**: Claude Code on your computer, with the account you're already signed in to it with, so there's no API key. Chrome extensions can't start programs, so a small helper (`native-host/`) runs `claude -p` for Tab Desk over Chrome native messaging. It never reads Claude Code's credentials. Install it once, then press **Test connection**; see [Claude Code helper](#claude-code-helper) below. Summaries made this way are marked *Claude Code*.
   - **How the prompt is built:** every tab summary starts with a fixed base prompt that asks for JSON in the order `facts`, `summary`, `status`. After it comes **one** set of detailed instructions, the most specific one that applies: a matching page rule, else the group's instructions, else the general instructions, else the built-in default. They replace each other; they don't add up. You can see the base prompt and the default instructions under **Settings** → *Summary instructions*.
   - **Custom instructions:** general instructions, instructions for a group (from its ⋯ menu, saved by group name), and **instructions for sites and pages**, all under **Settings** → *Summary instructions*, written in a short template (*This page is / Facts / Summary / Status*). A rule matches a site (`github.com`), a page pattern on the address without `https://` (`*` is one part of the path, `**` is anything: `github.com/*/*` is a repo's home, `github.com/*/*/pulls` its pull request list, `github.com/*/*/pull/*` one pull request), or a `/regular expression/`. When several rules match, the most specific one is used (a page pattern beats a whole site). **Draft with AI** on a rule looks at a matching open tab and fills in the template for you to edit; *Insert template* gives the empty template. A tab's status menu has *AI instructions for pages like this…* with the pattern filled in.
   - **Page fields and status rules (any site):** a rule can also list a few values to read from the page, one per line as `name: CSS selector` (add ` @attribute` to read an attribute, `name[]:` for every match, `name: label: Status` for the value next to a label), and status rules such as `done when state matches /merged|closed/`, `needs you when reviewers has {viewer}`, `ai otherwise` (first match wins). When a rule decides the status, it's set by code from what the page shows, and the AI only writes the sentence from those values and a short excerpt. **Test on an open tab** shows each value and the status it gives. Built-in presets do this for **GitHub pull requests** (any subpage) and **Actions runs**, using your signed-in login to tell whose turn it is; turn them off, or copy one into a rule to change it.
@@ -49,7 +50,22 @@ Most actions can be undone from the toast that follows them.
 2. Click **Load unpacked** and choose the `src/` folder.
 3. Click the Tab Desk toolbar icon, or press `Alt+Shift+D`, to open the side panel. `Alt+Shift+F` opens the full page, and `Alt+Shift+K` opens it with the palette ready. Right-click the icon for *Open full dashboard*. You can change the shortcuts at `chrome://extensions/shortcuts`.
 
-Requires Chrome 121 or later (AI summaries on-device need Chrome 138+). Permissions: `tabs` and `tabGroups` to read and manage tabs, `storage` for saved workspaces and settings, `favicon` to show site icons, `scripting` to read the text of a page you summarize, `sidePanel` for the side panel, `contextMenus` for the icon's right-click menu. Access to page content (`<all_urls>`), to the Gemini API and to the Claude API are optional and only requested when you first use them.
+Requires Chrome 121 or later (AI summaries on-device need Chrome 138+). Permissions: `tabs` and `tabGroups` to read and manage tabs, `storage` for saved workspaces and settings, `favicon` to show site icons, `scripting` to read the text of a page you summarize, `sidePanel` for the side panel, `contextMenus` for the icon's right-click menu. Access to page content (`<all_urls>`), to the Gemini API and to the Claude API, and `nativeMessaging` (to talk to the Claude Code helper) are optional and only requested when you first use them.
+
+### Claude Code helper
+
+For **Settings** → *General* → *Cloud* → **Claude Code (local)**. You need [Node.js 18+](https://nodejs.org) and [Claude Code](https://claude.com/claude-code), signed in (`claude` works in a terminal). Settings shows the exact command with this copy's extension ID filled in. From this folder:
+
+```sh
+# macOS or Linux
+./native-host/install.sh <extension-id>
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File native-host\install.ps1 -ExtensionId <extension-id>
+```
+
+The script copies the helper to your user folder (`~/Library/Application Support/Tab Desk`, `~/.local/share/tab-desk` or `%LOCALAPPDATA%\TabDesk`), remembers where `node` and `claude` are, and registers it with Chrome (and Chromium, Edge, Brave and Vivaldi where installed). Restart Chrome if Test connection still says the helper isn't installed. Remove it with `install.sh --uninstall` or `install.ps1 -Uninstall`.
+
+For each summary the helper runs `claude -p --model <model> --output-format json --tools "" --strict-mcp-config --no-session-persistence --system-prompt-file <tmp>` in an empty temp folder, with the page text on stdin: no tools, no MCP servers, no project files, nothing saved. The model is `haiku` by default; any alias or full model name works. Usage counts toward the Claude account Claude Code is signed in to.
 
 ## Development
 
@@ -67,13 +83,14 @@ No build step. The code is plain ES modules:
 | `src/lib/tab-strip.js` | Tab strip settings and which groups to collapse when you switch tabs |
 | `src/lib/fields.js` | Pure helpers for page fields and status rules: parsing, deciding the status, built-in GitHub presets |
 | `src/lib/ai-core.js` | Pure AI helpers: settings, instructions, engine choice, prompts, Gemini and Claude requests and stream parsing, safe Markdown rendering |
-| `src/lib/ai.js` | AI engines: on-device Summarizer API, Gemini API, Claude API, page text extraction, cache |
+| `src/lib/ai.js` | AI engines: on-device Summarizer API, Gemini API, Claude API, Claude Code through the helper, page text extraction, cache |
 | `src/ai-ui.js` | Summarize buttons, summary cards, AI settings and instruction dialogs |
+| `native-host/` | The Claude Code helper (a Node.js native messaging host that runs `claude -p`) and its install scripts for macOS, Linux and Windows |
 
 ```sh
 npm test        # unit tests for src/lib/model.js (Node 20+)
 npm run smoke   # loads the extension in Chromium via Playwright and drives the page
-npm run smoke:ai  # AI summaries end to end, with a fake on-device model and fake Gemini and Claude endpoints
+npm run smoke:ai  # AI summaries end to end, with a fake on-device model, fake Gemini and Claude endpoints, and the real Claude Code helper with a fake `claude`
 ```
 
 `npm run smoke` needs the `playwright` package and a Chromium build available to it.
