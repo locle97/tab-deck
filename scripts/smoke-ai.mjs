@@ -337,6 +337,31 @@ try {
   assert.equal(await page.locator('.chip, .done-row').count(), 0, 'no status filter or Done row');
   step('dashboard cards show tab summaries, status edges, the group sentence; and the sort menu works');
 
+  // The same page open in two groups (Research has its own instructions, Other doesn't): summarizing
+  // one group must not rewrite the shared tab and mark the other group "Tabs changed", back and forth.
+  await page.evaluate(async base => {
+    const [other] = await chrome.tabs.query({ url: base + '/other' });
+    const t = await chrome.tabs.create({ url: base + '/alpha', active: false });
+    await new Promise(r => { const f = (id, i) => { if (id === t.id && i.status === 'complete') { chrome.tabs.onUpdated.removeListener(f); r(); } }; chrome.tabs.onUpdated.addListener(f); });
+    await chrome.tabs.group({ tabIds: [t.id], groupId: other.groupId });
+  }, `http://localhost:${port}`);
+  const card = n => page.locator(`.card:has(.card-name:text-is("${n}"))`);
+  await card('Other').locator('.card-head [data-act=ai-group]').waitFor();
+  const alphaAt = () => page.evaluate(async u => (await chrome.storage.local.get('aiTabInsights')).aiTabInsights?.[u]?.at, U('/alpha'));
+  const atBefore = await alphaAt();
+  for (const n of ['Other', 'Research', 'Other']) {
+    await card(n).locator('.card-head [data-act=ai-group]').click();
+    await page.waitForFunction(name => {
+      const c = [...document.querySelectorAll('.card')].find(e => e.querySelector('.card-name')?.textContent.trim() === name);
+      return c && c.querySelector('.ai-gtext') && !c.querySelector('.ai-gline.is-running');
+    }, n);
+  }
+  console.log('DEBUG', JSON.stringify(await page.evaluate(async () => { const r = await chrome.storage.local.get(['aiTabInsights','aiGroupInsights']); return { t: Object.fromEntries(Object.entries(r.aiTabInsights).map(([k,v])=>[k,[v.at,v.summary]])), g: Object.fromEntries(Object.entries(r.aiGroupInsights).map(([k,v])=>[k,[v.at,v.members]])) }; })));
+  await page.waitForTimeout(500);
+  assert.equal(await alphaAt(), atBefore, 'the shared page keeps its summary');
+  assert.equal(await page.locator('.card .ai-outdated').count(), 0, 'neither group shows Tabs changed');
+  step('a page open in two groups keeps one summary; summarizing either group doesn\'t mark the other "Tabs changed"');
+
   // The side panel shows the same statuses, read from storage, and picks up changes made in the page.
   const panel = await ctx.newPage();
   await panel.setViewportSize({ width: 380, height: 700 });

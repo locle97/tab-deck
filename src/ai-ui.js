@@ -6,7 +6,7 @@
 import * as AI from './lib/ai.js';
 import {
   groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, CLOUDS, cloudOf, cloudConsent, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
-  effectiveStatus, rollupStatus, staleCheck, addMark, stableTitle, groupOutdated, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, isReadableUrl, compilePattern, suggestPattern, rulesFor,
+  effectiveStatus, rollupStatus, staleCheck, addMark, stableTitle, groupOutdated, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, insightKey, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
 import { parseFields, parseStatusRules, decideStatus, factsLine, PRESETS } from './lib/fields.js';
@@ -372,14 +372,27 @@ function pump() {
   }
 }
 
+/**
+ * Is this page open in more than one group? Its summary is saved once per address, so two groups
+ * share it. Each group's instructions would give a different summary, and summarizing one group
+ * would rewrite the tab under the other and mark that group "Tabs changed", back and forth.
+ */
+function sharedPage(t) {
+  const k = insightKey(urlOf(t));
+  const owners = new Set(ctx.allTabs().filter(x => insightKey(urlOf(x.t)) === k).map(x => x.owner?.id ?? 'inbox'));
+  return owners.size > 1;
+}
+
 async function runTab({ tabId, force }) {
   const x = ctx.tabById(tabId);
   if (!x) { settle(tabId); return; }
+  // A page shared by several groups keeps its summary while the page itself hasn't changed.
+  const reuse = !force && sharedPage(x.t);
   busy.add(tabId);
   tabErrors.delete(tabId);
   paintTab(tabId);
   try {
-    await AI.summarizeTab(x.t, { force, access: state.access, groupName: x.owner?.name ?? null });
+    await AI.summarizeTab(x.t, { force, reuse, access: state.access, groupName: x.owner?.name ?? null });
     marks.delete(tabId);
   } catch (e) {
     if (e?.name !== 'AbortError') { console.warn('Summary failed', e); tabErrors.set(tabId, e?.message || String(e)); }
@@ -404,7 +417,8 @@ async function runGroup(id, force) {
     const tabs = g.tabs.filter(t => isReadableUrl(urlOf(t)) || !state.access);
     run.statusText = `Summarizing tabs: 0 of ${tabs.length}`;
     paint();
-    await Promise.all(tabs.map(t => enqueue(t.id, force).then(() => { done++; run.statusText = `Summarizing tabs: ${done} of ${tabs.length}`; paint(); })));
+    // Summarize again redoes the group's own tabs, not pages it shares with another group (see sharedPage).
+    await Promise.all(tabs.map(t => enqueue(t.id, force && !sharedPage(t)).then(() => { done++; run.statusText = `Summarizing tabs: ${done} of ${tabs.length}`; paint(); })));
     if (run.ctrl.signal.aborted) throw new DOMException('Stopped', 'AbortError');
     const live = ctx.groupById(id) || g;
     await AI.summarizeGroup({ name: live.name, tabs: live.tabs }, {
