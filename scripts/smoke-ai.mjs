@@ -445,6 +445,24 @@ try {
   if (SHOTS) await card('Other').screenshot({ path: join(SHOTS, 'unloaded-after.png') });
   step('Summarize loads a tab Chrome hasn’t loaded, summarizes its page text, and puts it back to sleep');
 
+  // Settings › Performance: keep such tabs loaded after Summarize loads them.
+  await page.click('#settingsBtn');
+  await page.click('#setTab-performance');
+  assert.equal(await page.isChecked('#aiKeepLoaded'), false, 'off by default');
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'settings-performance.png') });
+  await page.check('#aiKeepLoaded');
+  await page.click('#setTab-instructions'); // leave the remembered tab as the later steps expect it
+  await page.click('[data-m=ok]');
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Settings saved'));
+  assert.equal(await page.evaluate(async u => (await chrome.tabs.query({ url: u }))[0].discarded, sleepyUrl), true, 'still asleep from the last step');
+  await card('Other').locator('.card-head [data-act=ai-group]').click();
+  await page.waitForFunction(async u => { const [t] = await chrome.tabs.query({ url: u }); return t && !t.discarded && t.status === 'complete'; }, sleepyUrl, { timeout: 30000 });
+  await page.waitForFunction(() => { const c = [...document.querySelectorAll('.card')].find(e => e.querySelector('.card-name')?.textContent.trim() === 'Other'); return c && !c.querySelector('.ai-gline.is-running'); });
+  await page.waitForTimeout(500);
+  assert.equal((await page.evaluate(async u => (await chrome.tabs.query({ url: u }))[0].discarded, sleepyUrl)), false, 'the tab stays loaded');
+  await page.evaluate(async () => { const k = 'aiSettings'; const r = await chrome.storage.local.get(k); if (r[k]) await chrome.storage.local.set({ [k]: { ...r[k], keepLoaded: false } }); });
+  step('Settings › Performance can keep tabs loaded after Summarize loads them');
+
   // The side panel shows the same statuses, read from storage, and picks up changes made in the page.
   const panel = await ctx.newPage();
   await panel.setViewportSize({ width: 380, height: 700 });

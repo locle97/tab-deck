@@ -26,6 +26,7 @@ const IC = {
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r=".6" fill="currentColor"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+  gauge: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 18a9 9 0 1 1 17 0"/><path d="m12 14 4-5"/><circle cx="12" cy="14" r="1.2" fill="currentColor"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
 };
 
@@ -114,7 +115,7 @@ function tabLineInner(t) {
     return `<span class="ai-sum${other}" title="${esc(why)}\n${esc(meta)}">${esc(ins.summary)}</span>`;
   }
   if (queued.has(t.id)) return '<span class="ai-dim">Waiting to summarize…</span>';
-  if (notLoaded(t) && isReadableUrl(urlOf(t))) return '<span class="ai-dim" title="Chrome hasn’t loaded this tab yet. Summarize loads it, reads it and puts it back to sleep.">Not loaded yet</span>';
+  if (notLoaded(t) && isReadableUrl(urlOf(t))) return '<span class="ai-dim" title="Chrome hasn’t loaded this tab yet. Summarize loads it to read it.">Not loaded yet</span>';
   return '';
 }
 
@@ -428,8 +429,9 @@ async function runTab({ tabId, force, wake }) {
   } catch (e) {
     if (e?.name !== 'AbortError') { console.warn('Summary failed', e); tabErrors.set(tabId, e?.message || String(e)); }
   }
-  // It was asleep before we loaded it: put it back to sleep, unless you opened it meanwhile.
-  if (slept) await chrome.tabs.get(tabId).then(t => (t.active ? null : chrome.tabs.discard(tabId))).catch(() => {});
+  // It was asleep before we loaded it: put it back to sleep, unless you opened it meanwhile or
+  // asked to keep such tabs loaded (Settings › Performance).
+  if (slept && !state.settings.keepLoaded) await chrome.tabs.get(tabId).then(t => (t.active ? null : chrome.tabs.discard(tabId))).catch(() => {});
   busy.delete(tabId);
   if (state.local !== 'available') refreshState();
   paintTab(tabId);
@@ -1028,7 +1030,7 @@ function ruleCount(pattern) {
 }
 
 const TAB_KEY = 'tabdesk.settingsTab';
-const lastTab = () => { try { const t = localStorage.getItem(TAB_KEY); return ['instructions', 'usage'].includes(t) ? t : 'general'; } catch { return 'general'; } };
+const lastTab = () => { try { const t = localStorage.getItem(TAB_KEY); return ['instructions', 'performance', 'usage'].includes(t) ? t : 'general'; } catch { return 'general'; } };
 
 export async function openAiSettings(opts = {}) {
   const { focus, newRule, rulesFor: forUrl } = opts;
@@ -1049,6 +1051,7 @@ export async function openAiSettings(opts = {}) {
       <nav class="settings-nav" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
         <button class="settings-tab" role="tab" id="setTab-general" data-tab="general" aria-controls="setPanel-general" aria-selected="${tab === 'general'}" tabindex="${tab === 'general' ? 0 : -1}" type="button">${IC.gear}<span>General</span></button>
         <button class="settings-tab" role="tab" id="setTab-instructions" data-tab="instructions" aria-controls="setPanel-instructions" aria-selected="${tab === 'instructions'}" tabindex="${tab === 'instructions' ? 0 : -1}" type="button">${IC.note}<span>Summary instructions</span></button>
+        <button class="settings-tab" role="tab" id="setTab-performance" data-tab="performance" aria-controls="setPanel-performance" aria-selected="${tab === 'performance'}" tabindex="${tab === 'performance' ? 0 : -1}" type="button">${IC.gauge}<span>Performance</span></button>
         <button class="settings-tab" role="tab" id="setTab-usage" data-tab="usage" aria-controls="setPanel-usage" aria-selected="${tab === 'usage'}" tabindex="${tab === 'usage' ? 0 : -1}" type="button">${IC.chart}<span>Usage</span></button>
       </nav>
       <div class="dialog-body ai-settings settings-panels">
@@ -1140,6 +1143,13 @@ export async function openAiSettings(opts = {}) {
         ${groupRows.length ? `<ul class="ai-glist">${groupRows.map(([k, v]) => `<li data-gk="${esc(k)}"><b>${esc(k)}</b><span>${esc(v.length > 90 ? v.slice(0, 90) + '…' : v)}</span><button class="icon-btn" data-m="gdel" type="button" title="Remove" aria-label="Remove instructions for ${esc(k)}">${IC.close}</button></li>`).join('')}</ul>`
           : '<div class="ai-muted ai-small">None yet. Open a group and choose “AI instructions” from its ⋯ menu.</div>'}
       </div>
+      </section>
+
+      <section class="settings-panel" role="tabpanel" id="setPanel-performance" aria-labelledby="setTab-performance" ${tab === 'performance' ? '' : 'hidden'}>
+      <h3 class="first">Tabs Chrome hasn’t loaded</h3>
+      <p class="ai-muted ai-small">After a restart, Chrome doesn’t load a tab until you open it, and it puts tabs you haven’t used in a while to sleep. Summarize loads such a tab in the background to read it. The automatic refresh never loads tabs.</p>
+      <label class="ai-check"><input type="checkbox" id="aiKeepLoaded" ${s.keepLoaded ? 'checked' : ''}><span>Keep tabs loaded after Summarize loads them</span></label>
+      <p class="ai-muted ai-small ai-indent">When off, each tab goes back to sleep once it’s summarized, to save memory. Turn on to have them ready when you switch to them.</p>
       </section>
 
       <section class="settings-panel" role="tabpanel" id="setPanel-usage" aria-labelledby="setTab-usage" ${tab === 'usage' ? '' : 'hidden'}>
@@ -1341,6 +1351,7 @@ export async function openAiSettings(opts = {}) {
       await AI.saveSettings({
         enabled: $b('#aiEnabled').checked,
         tabLines: $b('#aiTabLines').checked,
+        keepLoaded: $b('#aiKeepLoaded').checked,
         engine: box.querySelector('input[name=aiEngine]:checked')?.value || 'auto',
         auto: box.querySelector('input[name=aiAuto]:checked')?.value || 'local',
         every: +$b('#aiEvery').value || state.settings.every,

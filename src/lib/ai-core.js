@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   auto: 'local',           // interval refresh: 'off' | 'local' (on-device only) | 'all'
   every: EVERY_DEFAULT,    // interval refresh, minutes
   tabLines: false,         // show each tab's summary as a line under its title (otherwise only in the status tooltip)
+  keepLoaded: false,       // a tab Summarize had to load stays loaded afterwards (otherwise it is put back to sleep)
   model: DEFAULT_MODEL,      // Gemini model
   claudeModel: DEFAULT_CLAUDE_MODEL,
   claudeCodeModel: DEFAULT_CLAUDE_CODE_MODEL, // passed to `claude -p --model`: an alias (haiku, sonnet) or a full name
@@ -43,6 +44,7 @@ export function normalizeSettings(s) {
   if (!CLAUDE_CODE_MODEL_RE.test(out.claudeCodeModel)) out.claudeCodeModel = DEFAULT_CLAUDE_CODE_MODEL;
   delete out.length;
   out.tabLines = out.tabLines === true;
+  out.keepLoaded = out.keepLoaded === true;
   out.presets = out.presets !== false;
   if (typeof out.model !== 'string' || !out.model.trim()) out.model = DEFAULT_MODEL;
   out.model = out.model.trim();
