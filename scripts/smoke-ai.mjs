@@ -399,8 +399,37 @@ try {
   await page.click('.card-tab:has-text("/pr/5") .ai-edge');
   await page.click('.menu button:has-text("Let the AI decide")');
   await panel.waitForSelector('.card-tab:has-text("/pr/5") .ai-edge.st-action');
-  await panel.close();
   step('side panel shows the same statuses and updates when they change in the page');
+
+  // A long group name truncates; Summarize and More stay visible and on top, without hovering the card.
+  const longName = 'Research with a very long group name that cannot fit in the card header';
+  const renameResearch = to => page.evaluate(async t => {
+    const [g] = await chrome.tabGroups.query({ title: t[0] });
+    await chrome.tabGroups.update(g.id, { title: t[1] });
+  }, to);
+  await renameResearch(['Research', longName]);
+  await page.mouse.move(0, 0);
+  await panel.mouse.move(0, 0);
+  const headOk = (p, sel) => p.$eval(sel, head => {
+    const name = head.querySelector('.card-name');
+    const onTop = b => { const r = b.getBoundingClientRect(); return r.width > 0 && document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('button') === b; };
+    return {
+      truncated: name.scrollWidth > name.clientWidth,
+      ai: onTop(head.querySelector('[data-act=ai-group]')),
+      more: onTop(head.querySelector('[data-act=card-more]')),
+      noSwitch: !head.querySelector('[data-act=focus]'),
+    };
+  });
+  const want = { truncated: true, ai: true, more: true, noSwitch: true };
+  for (const p of [panel, page]) {
+    await p.waitForSelector(`.card-name:text-is("${longName}")`);
+    assert.deepEqual(await headOk(p, `.card:has(.card-name:text-is("${longName}")) .card-head`), want);
+  }
+  if (SHOTS) await panel.screenshot({ path: join(SHOTS, 'card-head-long-name.png') });
+  await renameResearch([longName, 'Research']);
+  await page.waitForSelector('.card-name:text-is("Research")');
+  await panel.close();
+  step('a long group name truncates and leaves Summarize and More clickable, in the panel and the dashboard');
 
   // Gemini key, consent, and cloud summaries.
   await page.click('#settingsBtn');
