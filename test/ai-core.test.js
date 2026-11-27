@@ -291,6 +291,9 @@ test('summary line under each tab is off by default', () => {
   assert.equal(normalizeSettings({}).tabLines, false);
   assert.equal(normalizeSettings({ tabLines: 'yes' }).tabLines, false);
   assert.equal(normalizeSettings({ tabLines: true }).tabLines, true);
+  assert.equal(normalizeSettings({}).keepLoaded, false, 'tabs Summarize loads go back to sleep by default');
+  assert.equal(normalizeSettings({ keepLoaded: 'yes' }).keepLoaded, false);
+  assert.equal(normalizeSettings({ keepLoaded: true }).keepLoaded, true);
 });
 
 test('summary and status come from one analysis: facts first, then status, then the summary that explains it', () => {
