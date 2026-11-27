@@ -211,10 +211,12 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 
 /* Dashboard columns follow the width of the main area (not the window, since the sidebar can be resized):
    large 3 columns, medium 2, small 1. List view: one card per row. */
-.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.cards { --card-gap: 14px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--card-gap); align-items: start; }
+/* Masonry packing (packCards in dashboard.js): 2px rows, no row gap; each card spans its own height plus the gap. */
+.cards.packed { grid-auto-rows: 2px; row-gap: 0; }
 @container main (max-width: 1000px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @container main (max-width: 640px) { .cards { grid-template-columns: minmax(0, 1fr); } }
-.dash.is-list .cards { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.dash.is-list .cards { --card-gap: 10px; grid-template-columns: minmax(0, 1fr); }
 .dash.is-list .card-tabs { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); column-gap: 12px; }
 
 /* Card hierarchy: 1 name + status pill (the only bold text), 2 summary line, 3 tab rows, 4 footer. */
@@ -611,7 +613,7 @@ body.panel .pane { padding: 0 0 24px; }
 .panel-bar .dash-tools .grow { flex: 1; }
 .panel-bar .icon-btn { width: 30px; height: 30px; }
 .panel-bar .icon-btn svg { width: 16px; height: 16px; }
-body.panel .cards { gap: 10px; }
+body.panel .cards { --card-gap: 10px; }
 body.panel .inbox-row { margin-top: 10px; }
 
 /* Drag and drop: tabs and groups. A line shows where the drop lands; a ring shows a group (or the Inbox) it joins. */

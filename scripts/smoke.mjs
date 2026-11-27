@@ -315,6 +315,18 @@ try {
     let got = 0;
     for (let k = 0; k < 30 && got !== n; k++) { got = await cols(); if (got !== n) await page.waitForTimeout(100); }
     assert.equal(got, n, `${w}px wide should show ${n} columns`);
+    await page.waitForTimeout(100);
+    // Masonry: each card sits one gap under the card above it in its column (no hole, no overlap).
+    const holes = await page.$$eval('.card[data-card]', cs => {
+      const gap = parseFloat(getComputedStyle(cs[0].parentElement).getPropertyValue('--card-gap'));
+      const boxes = cs.map(c => c.getBoundingClientRect());
+      return boxes.flatMap((b, i) => {
+        const above = boxes.filter(o => Math.abs(o.left - b.left) < 2 && o.bottom <= b.top + 1).sort((p, q) => q.bottom - p.bottom)[0];
+        const d = above ? b.top - above.bottom : 0;
+        return above && (d < gap - 1 || d > gap + 3) ? [`card ${i}: ${Math.round(d)}px`] : [];
+      });
+    });
+    assert.deepEqual(holes, [], `${w}px: cards pack under the card above`);
   }
   await page.setViewportSize({ width: 1280, height: 820 });
   step('dashboard shows 3, 2 or 1 columns depending on width');
