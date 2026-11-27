@@ -466,10 +466,9 @@ function groupCard(g) {
   const cls = ['card', s === 'action' && 'needs-you'].filter(Boolean).join(' ');
   return `<article class="${cls}" data-card="${g.id}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
     <header class="card-head" draggable="true">
-      <button class="card-name" data-act="open" type="button" title="${PANEL ? 'Open' : 'Show'} ${esc(g.name)} in ${PANEL ? 'the full dashboard' : 'detail'}">${esc(g.name)}</button>${AIUI.groupStatusBadge(g)}${AIUI.cardSumButton(g)}
-      ${model.windowCount > 1 ? `<span class="win-tag">W${g.window}</span>` : ''}
+      <button class="card-name" data-act="open" type="button" title="${PANEL ? 'Open' : 'Show'} ${esc(g.name)} in ${PANEL ? 'the full dashboard' : 'detail'}">${esc(g.name)}</button>${AIUI.groupStatusBadge(g)}
       <span class="card-tools">
-        <button class="btn sm" data-act="focus" type="button" title="Expand this group, collapse the others in its window and open its most recent tab">${ICON.go} Switch</button>
+        ${model.windowCount > 1 ? `<span class="win-tag">W${g.window}</span>` : ''}${AIUI.cardSumButton(g)}
         <button class="icon-btn" data-act="card-more" type="button" title="More actions" aria-label="More actions for ${esc(g.name)}">${ICON.more}</button>
       </span>
     </header>

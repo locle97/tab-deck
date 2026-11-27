@@ -226,11 +226,11 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .card-name:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--c, var(--faint)); }
 .card-head .ai-st-wrap { flex: none; }
 .card-head .win-tag { flex: none; }
-/* Hover tools float over the right end of the header, so they never squeeze the name. */
-.card-head { position: relative; }
-.card-tools { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 4px; padding-left: 24px; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--c) 12%, var(--surface)) 24px); opacity: 0; transition: opacity .12s; }
-.card:hover .card-tools, .card:focus-within .card-tools { opacity: 1; }
-@media (hover: none) { .card-tools { position: static; transform: none; margin-left: auto; padding-left: 0; background: none; opacity: 1; } }
+/* Right-hand tools (window tag, Summarize, More) never shrink; the name truncates instead. */
+.card-tools { flex: none; display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.card-tools .win-tag { margin-right: 4px; }
+.card-tools [data-act="card-more"] { color: var(--faint); }
+.card-tools [data-act="card-more"]:hover { color: var(--ink); }
 .card-tools .icon-btn { width: 28px; height: 28px; }
 .card-tools .icon-btn:hover { background: var(--surface); }
 .btn.sm { padding: 4px 9px; font-size: 12.5px; border-radius: 7px; }
