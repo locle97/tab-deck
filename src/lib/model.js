@@ -275,16 +275,3 @@ export function sortGroups(groups, mode, rankOf = () => 0) {
 export function sortTabsBy(tabs, rankOf) {
   return tabs.map((t, i) => ({ t, i })).sort((a, b) => rankOf(a.t) - rankOf(b.t) || a.i - b.i).map(x => x.t);
 }
-
-/** How many items have each status: {action: 2, done: 1}. Items with no status are counted under 'none'. */
-function countBy(items, statusOf) {
-  const out = {};
-  for (const x of items) { const s = statusOf(x) || 'none'; out[s] = (out[s] || 0) + 1; }
-  return out;
-}
-
-/** Segments for a card's status bar: [{status, n}] in `order`, then tabs with no status. Empty ones are left out. */
-export function statusSegments(tabs, statusOf, order) {
-  const c = countBy(tabs, statusOf);
-  return [...order, 'none'].filter(s => c[s]).map(s => ({ status: s, n: c[s] }));
-}

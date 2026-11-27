@@ -175,7 +175,7 @@ test('lastUsed is the most recent tab access in a group', () => {
 });
 
 /* ---------- dashboard ordering and grouping ---------- */
-import { sortGroups, sortTabsBy, statusSegments } from '../src/lib/model.js';
+import { sortGroups, sortTabsBy } from '../src/lib/model.js';
 
 const dg = (id, st, last) => ({ id, st, tabs: [{ lastAccessed: last }] });
 const dgs = [dg(1, 'done', 30), dg(2, 'action', 10), dg(3, null, 50), dg(4, 'action', 20)];
@@ -191,12 +191,6 @@ test('sortGroups: urgent by rank then strip order, recent by last use, manual ke
 test('sortTabsBy is stable', () => {
   const tabs = [{ id: 1, s: 'done' }, { id: 2, s: 'action' }, { id: 3, s: 'done' }, { id: 4, s: 'action' }];
   assert.deepEqual(sortTabsBy(tabs, t => rank(t.s)).map(t => t.id), [2, 4, 1, 3]);
-});
-
-test('statusSegments', () => {
-  const tabs = [{ s: 'done' }, { s: null }, { s: 'action' }, { s: 'done' }];
-  assert.deepEqual(statusSegments(tabs, t => t.s, ['action', 'working', 'waiting', 'done', 'info']),
-    [{ status: 'action', n: 1 }, { status: 'done', n: 2 }, { status: 'none', n: 1 }]);
 });
 
 test('tabMoveIndex: final index for a tab dropped before or after another tab', () => {

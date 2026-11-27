@@ -342,8 +342,8 @@ try {
   assert.ok(await page.isVisible('.card:has-text("Research") .card-head [data-act=ai-group]'), 'Summarize sits in the card header');
   assert.match(await page.textContent('.dash-bar .ai-next'), /^Next refresh in \d+ min$/, 'countdown to the next refresh in the header');
   assert.equal(await page.locator('text=Tabs changed').count(), 0, 'groups show no "Tabs changed"; only tabs show Outdated');
-  assert.ok(await page.isVisible('.card:has-text("Research") .st-bar'));
-  assert.ok(await page.isVisible('.card.needs-you:has-text("Research")'));
+  assert.equal(await page.locator('.st-bar, .card.needs-you').count(), 0, 'no status bar or red border: the header color carries the group');
+  assert.equal(await page.getAttribute('.card:has-text("Research")', 'data-color'), 'purple');
   // Most urgent is the default sort: Research (needs you) comes before Other, and /pr/5 is its first tab.
   const order = () => page.$$eval('.card .card-name', ns => ns.map(n => n.textContent.trim()));
   assert.deepEqual((await order()).slice(0, 2), ['Research', 'Other']);
@@ -357,7 +357,6 @@ try {
   await page.waitForFunction(() => document.querySelector('.card .card-name')?.textContent.trim() === 'Research');
   assert.equal(await page.locator('.chip, .done-row').count(), 0, 'no status filter or Done row: groups never grey out or fold away');
   assert.doesNotMatch(await page.textContent('.card:has-text("Research") .card-meta'), /done/, 'no "X of Y done" footer');
-  assert.match(await page.getAttribute('.card:has-text("Research") .st-bar', 'title'), /Need action[\s\S]*Idle/, 'the status bar counts the new statuses');
   assert.equal(await page.locator('.card.is-done').count(), 0);
   assert.match(await page.textContent('.card:has-text("Other") .card-meta'), /1 of 1 working/, 'the footer counts tabs running a task');
   step('dashboard cards show tab summaries, status edges, the group sentence; and the sort menu works');

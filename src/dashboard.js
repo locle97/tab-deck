@@ -1,12 +1,12 @@
 import {
   COLORS, COLOR_NAMES, buildModel, allTabs, findDuplicates, duplicateCount, domainProposals,
   hostOf, shortUrl, siteName, plural, timeAgo, nextColor, score, savedLabel, groupMoveTarget, neighborMove,
-  cardTabs, groupFacts, lastUsed, sortGroups, sortTabsBy, statusSegments, tabMoveIndex,
+  cardTabs, groupFacts, lastUsed, sortGroups, sortTabsBy, tabMoveIndex,
 } from './lib/model.js';
 import * as A from './lib/actions.js';
 import { listWorkspaces, onWorkspacesChanged } from './lib/workspaces.js';
 import * as AIUI from './ai-ui.js';
-import { statusRank, STATUSES, STATUS_ORDER } from './lib/ai-core.js';
+import { statusRank, STATUSES } from './lib/ai-core.js';
 
 const SELF_URL = chrome.runtime.getURL('dashboard.html');
 const isMac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
@@ -441,15 +441,6 @@ function cardTabList(key, tabs) {
   return h;
 }
 
-/** Thin bar under the card header: one segment per status, sized by its number of tabs. */
-function statusBar(g) {
-  if (!AIUI.aiEnabled()) return '';
-  const segs = statusSegments(g.tabs, tabSt, STATUS_ORDER);
-  if (!segs.some(x => x.status !== 'none')) return '';
-  const label = segs.map(x => `${x.n} ${x.status === 'none' ? 'no status' : STATUSES[x.status].label}`).join(' · ');
-  return `<div class="st-bar" role="img" aria-label="${esc(label)}" title="${esc(label)}">${segs.map(x => `<i class="st-${x.status}" style="flex:${x.n}"></i>`).join('')}</div>`;
-}
-
 /** Footer note: how many of the group's tabs are running a task right now ("2 of 5 working"). */
 function cardProgress(g) {
   if (!AIUI.aiEnabled()) return '';
@@ -458,13 +449,11 @@ function cardProgress(g) {
 }
 
 function groupCard(g) {
-  const s = groupSt(g);
   const used = timeAgo(lastUsed(g.tabs));
   const meta = [groupFacts(g.tabs)];
   if (used) meta.push(used === 'now' ? 'used now' : `used ${used} ago`);
   if (g.collapsed) meta.push('collapsed');
-  const cls = ['card', s === 'action' && 'needs-you'].filter(Boolean).join(' ');
-  return `<article class="${cls}" data-card="${g.id}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
+  return `<article class="card" data-card="${g.id}" data-color="${esc(g.color)}" style="--c:${cvar(g.color)}" aria-label="${esc(g.name)}">
     <header class="card-head" draggable="true">
       <button class="card-name" data-act="open" type="button" title="${PANEL ? 'Open' : 'Show'} ${esc(g.name)} in ${PANEL ? 'the full dashboard' : 'detail'}">${esc(g.name)}</button>${AIUI.groupStatusBadge(g)}
       <span class="card-tools">
@@ -472,7 +461,6 @@ function groupCard(g) {
         <button class="icon-btn" data-act="card-more" type="button" title="More actions" aria-label="More actions for ${esc(g.name)}">${ICON.more}</button>
       </span>
     </header>
-    ${statusBar(g)}
     <div class="card-body">
       ${AIUI.groupSumCard(g)}
       ${cardTabList(g.id, g.tabs)}
