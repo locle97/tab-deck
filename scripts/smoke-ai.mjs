@@ -19,9 +19,11 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const SHOTS = process.env.SHOTS_DIR;
 const step = msg => console.log('✓', msg);
 
+let liveText = 'The first version of this page.';
 const server = createServer((req, res) => {
   res.setHeader('content-type', 'text/html');
-  const body = req.url === '/issue/7'
+  const body = req.url === '/live' ? `<main><h1>Live page</h1><p>${liveText}</p></main>`
+    : req.url === '/issue/7'
     ? `<meta name="user-login" content="me-user"><main><h1>Fix the login page</h1><span class="State">Open</span><dl><dt>Assignee</dt><dd>me-user</dd><dt>Labels</dt><dd>bug</dd></dl><p>Long discussion that says Closed and Merged many times. ${'Closed. Merged. '.repeat(40)}</p></main>`
     : req.url === '/long'
     ? `<main><h1>Long read</h1><span class="State" title="Status: Merged">Merged</span><article><p>One comment</p></article><div class="reviewers"><svg class="octicon octicon-check-circle-fill color-fg-success" aria-hidden="true"><path d="M0 0"/></svg> reviewer-ann <svg class="octicon octicon-dot-fill fgColor-attention" aria-hidden="true"></svg> ci-build <button aria-label="Re-request review"><svg class="octicon octicon-sync"></svg></button><clipboard-copy aria-label="Copy code"><svg class="octicon octicon-check color-fg-success"></svg></clipboard-copy><button><svg class="octicon octicon-git-pull-request-closed"></svg> Close pull request</button></div>${Array.from({ length: 60 }, (_, i) => `<p>Paragraph ${i} ${'lorem ipsum '.repeat(30)}</p>`).join('')}<form><h3 class="status-heading">Pull request successfully merged and closed</h3></form></main>`
@@ -264,13 +266,18 @@ try {
   await page.click('[data-m=cancel]');
   step('status menu offers instructions for pages like this one; Draft with AI fills the template from that page; Insert template and Undo');
 
-  // Automatic summaries: the model is ready now, so a new tab gets summarized on its own.
+  // A new tab isn't summarized on its own; the interval refresh picks it up when it is due.
   const p2 = await ctx.newPage();
   await p2.goto(U('/fresh'));
   await page.bringToFront();
   await page.click('[data-nav=inbox]');
+  await page.waitForTimeout(800);
+  assert.doesNotMatch(await line(page, '/fresh').textContent().catch(() => ''), /purple-otter/, 'no summary before the refresh is due');
+  await page.evaluate(() => chrome.storage.local.set({ aiLastRefresh: 1 })); // as if the last refresh was long ago
+  await page.reload();
+  await page.click('[data-nav=inbox]');
   await waitLine(page, '/fresh', /mentions purple-otter/);
-  step('new tabs are summarized automatically once the on-device model is ready');
+  step('new tabs wait for the interval refresh, which summarizes them once it is due');
 
   // Saved summaries come back after a reload, without calling the model again.
   await page.reload();
@@ -281,12 +288,39 @@ try {
   assert.equal(after, 0, 'unchanged pages are not sent to the model again after a reload');
   step('summaries and statuses are saved and shown again after a reload without re-running the model');
 
+  // A page that changes after its summary: marked outdated, not summarized again.
+  const pLive = await ctx.newPage();
+  await pLive.goto(U('/live'));
+  await page.bringToFront();
+  await page.click('[data-nav=inbox]');
+  await page.hover('.tab:has-text("/live")');
+  await page.click('.tab:has-text("/live") [data-act=ai-tab]');
+  await page.waitForSelector('.tab:has-text("/live") .ai-sum');
+  const before = await page.evaluate(() => window.__ai.calls.length);
+  await pLive.reload(); // same text: not outdated
+  await page.waitForTimeout(6500);
+  assert.equal(await page.locator('.tab:has-text("/live") .ai-sum.is-stale').count(), 0, 'a reload without changes keeps the summary');
+  liveText = 'A completely different second version, merged and closed.';
+  await pLive.reload();
+  await page.waitForSelector('.tab:has-text("/live") .ai-sum.is-stale', { timeout: 15000 });
+  assert.match(await line(page, '/live').textContent(), /^Outdated/);
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, 'ai-outdated.png') });
+  assert.equal(await page.evaluate(() => window.__ai.calls.length), before, 'marking a summary outdated calls no model');
+  await page.hover('.tab:has-text("/live")');
+  await page.click('.tab:has-text("/live") [data-act=ai-tab]');
+  await page.waitForFunction(() => {
+    const row = [...document.querySelectorAll('.tab')].find(r => r.textContent.includes('/live'));
+    return row?.querySelector('.ai-sum') && !row.querySelector('.ai-sum.is-stale');
+  });
+  step('a page that changed after its summary is marked Outdated without a model call; Summarize clears it');
+
   // Dashboard: tab lines, status dots, group sentence and "most urgent first".
   await page.click('[data-nav=dashboard]');
   await page.waitForSelector('.card:has-text("Research") .ai-gtext');
   assert.match(await page.textContent('.card-tab:has-text("/pr/5") .ai-line'), /mentions purple-otter/);
   assert.equal(await page.locator('.card-tab:has-text("/pr/5") .ai-edge.st-action').count(), 1);
   assert.match(await page.textContent('.card:has-text("Research") .card-head'), /Needs you/);
+  assert.ok(await page.isVisible('.card:has-text("Research") .card-head [data-act=ai-group]'), 'Summarize sits in the card header');
   assert.ok(await page.isVisible('.card:has-text("Research") .st-bar'));
   assert.ok(await page.isVisible('.card.needs-you:has-text("Research")'));
   // Most urgent is the default sort: Research (needs you) comes before Other, and /pr/5 is its first tab.

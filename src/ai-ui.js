@@ -6,7 +6,7 @@
 import * as AI from './lib/ai.js';
 import {
   groupKey, chooseEngine, DEFAULT_MODEL, DEFAULT_CLAUDE_MODEL, CLOUDS, cloudOf, cloudConsent, consentKey, MAX_INSTRUCTIONS, MAX_RULES, STATUSES, STATUS_ORDER,
-  effectiveStatus, rollupStatus, needsInsight, isReadableUrl, compilePattern, suggestPattern, rulesFor,
+  effectiveStatus, rollupStatus, staleCheck, addMark, stableTitle, groupOutdated, nextRefreshAt, REFRESH, EVERY_MIN, EVERY_MAX, isReadableUrl, compilePattern, suggestPattern, rulesFor,
   INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS, baseTabPrompt,
 } from './lib/ai-core.js';
 import { parseFields, parseStatusRules, decideStatus, factsLine, PRESETS } from './lib/fields.js';
@@ -34,7 +34,6 @@ const queue = [];            // [{ tabId, force }]
 const queued = new Set();    // tab ids waiting
 const busy = new Set();      // tab ids running
 const tabErrors = new Map(); // tab id -> message
-const seen = new Map();      // tab id -> URL already looked at this session (auto mode)
 const waiters = new Map();   // tab id -> [resolve]
 const groupRuns = new Map(); // group id -> { status, text, statusText, progress, error, code, ctrl }
 let workers = 0;
@@ -54,8 +53,9 @@ export async function initAi(c) {
   log.clear = () => AI.clearPromptLog();
   window.tabDeskAiLog = log;
   await Promise.all([refreshState(), AI.loadInsights()]);
-  AI.onSettingsChanged(async () => { await refreshState(); ctx.render(); });
+  AI.onSettingsChanged(async () => { await refreshState(); ctx.render(); kickAuto(); });
   AI.onInsightsChanged(schedulePaint);
+  watchTabs();
   chrome.permissions.onAdded.addListener(refreshAccess);
   chrome.permissions.onRemoved.addListener(refreshAccess);
   document.getElementById('settingsBtn')?.addEventListener('click', () => openAiSettings());
@@ -100,7 +100,8 @@ function tabLineInner(t) {
   if (tabErrors.has(t.id)) return `<span class="ai-bad">${esc(tabErrors.get(t.id))}</span>`;
   const ins = AI.tabInsight(urlOf(t));
   if (ins?.summary) {
-    const meta = `${engineLabel(ins)} · ${ago(ins.at)}${ins.readable === false ? ' · from the title only' : ''}${ins.facts ? `\n${ins.facts}` : ''}`;
+    if (ins.stale) return `<span class="ai-sum is-stale" title="${esc(ins.summary)}\n${esc(STALE)}"><span class="ai-stale-tag">Outdated</span> ${esc(ins.summary)}</span>`;
+    const meta = `${writtenLine(ins)}${ins.readable === false ? ' · from the title only' : ''}${ins.facts ? `\n${ins.facts}` : ''}`;
     return `<span class="ai-sum" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</span>`;
   }
   if (queued.has(t.id)) return '<span class="ai-dim">Waiting to summarize…</span>';
@@ -128,21 +129,22 @@ function tabStatusInner(t, mode) {
   const s = effectiveStatus(ins);
   const label = s ? STATUSES[s].label : 'No status';
   if (mode === 'edge') {
-    const run = busy.has(t.id) ? ' is-busy' : queued.has(t.id) ? ' is-queued' : '';
-    const tip = busy.has(t.id) ? 'Summarizing…' : `${s ? label : 'No status yet'}${s ? (ins?.manual ? ' (set by you)' : ' (from AI)') : ''}. Click to change.`;
+    const run = busy.has(t.id) ? ' is-busy' : queued.has(t.id) ? ' is-queued' : ins?.stale ? ' is-stale' : '';
+    const tip = busy.has(t.id) ? 'Summarizing…' : `${s ? label : 'No status yet'}${s ? (ins?.manual ? ' (set by you)' : ' (from AI)') : ''}.${ins?.stale ? ` ${STALE}` : ''} Click to change.`;
     return `<button class="ai-edge st-${s || 'none'}${run}" data-act="ai-status" type="button" title="${esc(tip)}" aria-label="Status: ${esc(label)}"></button>`;
   }
   if (!state.settings.tabLines && busy.has(t.id)) {
     return compact ? '<span class="ai-spin" title="Summarizing…" aria-label="Summarizing"></span>' : '<span class="ai-st st-none static"><span class="ai-spin" aria-hidden="true"></span>Summarizing…</span>';
   }
   if (!state.settings.tabLines && tabErrors.has(t.id) && !compact) return `<button class="ai-st st-none ai-bad" data-act="ai-status" type="button" title="${esc(tabErrors.get(t.id))}">Couldn’t summarize</button>`;
-  const sum = !state.settings.tabLines && ins?.summary ? `${ins.summary}\n\n` : '';
+  const sum = !state.settings.tabLines && ins?.summary ? `${ins.summary}\n${ins.stale ? STALE : writtenLine(ins)}\n\n` : '';
   const from = ins?.manual ? ' (set by you)' : ins?.statusFrom === 'fields' ? ' (from page fields)' : ' (from AI)';
   const facts = ins?.facts && !ins?.manual ? `\n${ins.facts}` : '';
   const why = sum + (s ? `${label}${from}.${facts}\nClick to change.` : 'No status yet. Click to set one.');
-  if (compact) return `<button class="ai-dot-btn st-${s || 'none'}" data-act="ai-status" type="button" title="${esc(why)}" aria-label="Status: ${esc(label)}"><i></i></button>`;
+  const stale = ins?.stale ? ' is-stale' : '';
+  if (compact) return `<button class="ai-dot-btn st-${s || 'none'}${stale}" data-act="ai-status" type="button" title="${esc(why)}" aria-label="Status: ${esc(label)}"><i></i></button>`;
   if (!s) return `<button class="ai-st st-none" data-act="ai-status" type="button" title="${esc(why)}">Set status</button>`;
-  return `<button class="ai-st st-${s}${ins?.manual ? ' manual' : ''}" data-act="ai-status" type="button" title="${esc(why)}"><i></i>${esc(label)}</button>`;
+  return `<button class="ai-st st-${s}${ins?.manual ? ' manual' : ''}${stale}" data-act="ai-status" type="button" title="${esc(why)}"><i></i>${esc(label)}</button>`;
 }
 
 /** Most urgent status among a group's tabs. */
@@ -180,9 +182,12 @@ export function groupSumButtons() {
 }
 
 /** Compact Summarize button for a group card on the dashboard. */
-export function cardSumButton() {
+export function cardSumButton(g) {
   if (!aiEnabled()) return '';
-  return `<button class="icon-btn ai-card-btn" data-act="ai-group" type="button" title="Summarize this group and each of its tabs" aria-label="Summarize this group">${IC.spark}</button>`;
+  const run = g && groupRuns.get(g.id)?.status === 'running';
+  const old = g && isOutdated(g);
+  const tip = run ? 'Summarizing…' : old ? `${OUTDATED}` : 'Summarize this group and each of its tabs';
+  return `<button class="icon-btn ai-card-btn${old ? ' is-outdated' : ''}${run ? ' is-busy' : ''}" data-act="ai-group" type="button" title="${esc(tip)}" aria-label="Summarize ${esc(g?.name || 'this group')}"${run ? ' disabled' : ''}>${IC.spark}</button>`;
 }
 
 /** The group's one-sentence summary. `detail` also shows the instructions chip when there's no summary. */
@@ -212,9 +217,10 @@ function groupLineInner(g) {
       <span class="ai-tools always"><button class="link" data-act="${fix}" type="button">${fix === 'ai-settings' ? 'Settings' : 'Try again'}</button></span></div>`;
   }
   if (!ins?.summary) return '';
-  const meta = `${engineLabel(ins)} · ${ago(ins.at)}`;
-  return `<div class="ai-gline"><p class="ai-gtext" data-act="ai-expand" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</p>
-    <span class="ai-tools">
+  const old = isOutdated(g);
+  const meta = `${engineLabel(ins)} · ${ago(ins.at)}${old ? `\n${OUTDATED}` : ''}`;
+  return `<div class="ai-gline${old ? ' is-outdated' : ''}"><p class="ai-gtext" data-act="ai-expand" title="${esc(ins.summary)}\n${esc(meta)}">${esc(ins.summary)}</p>
+    <span class="ai-tools${old ? ' always' : ''}">${old ? `<span class="ai-outdated" title="${esc(OUTDATED)}">Tabs changed</span>` : ''}
       <button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${IC.refresh}</button>
       <button class="icon-btn" data-act="ai-instr" type="button" title="AI instructions for this group" aria-label="AI instructions for this group">${IC.note}</button>
     </span></div>`;
@@ -234,7 +240,7 @@ function groupSumInner(g, detail) {
   } else if (ins?.summary) {
     body = `<p class="ai-gtext">${esc(ins.summary)}</p>`;
   }
-  const engine = ins && !running ? `<span class="ai-engine${ins.engine === 'cloud' ? ' cloud' : ''}">${esc(engineLabel(ins))}</span><span class="ai-when">${esc(ago(ins.at))}</span>` : '';
+  const engine = ins && !running ? `<span class="ai-engine${ins.engine === 'cloud' ? ' cloud' : ''}">${esc(engineLabel(ins))}</span><span class="ai-when">${esc(ago(ins.at))}</span>${isOutdated(g) ? `<span class="ai-outdated" title="${esc(OUTDATED)}">Tabs changed</span>` : ''}` : '';
   const tools = running
     ? '<button class="btn ghost sm" data-act="ai-stop" type="button">Stop</button>'
     : `<button class="icon-btn" data-act="ai-refresh" type="button" title="Summarize again" aria-label="Summarize again">${IC.refresh}</button>
@@ -374,6 +380,7 @@ async function runTab({ tabId, force }) {
   paintTab(tabId);
   try {
     await AI.summarizeTab(x.t, { force, access: state.access, groupName: x.owner?.name ?? null });
+    marks.delete(tabId);
   } catch (e) {
     if (e?.name !== 'AbortError') { console.warn('Summary failed', e); tabErrors.set(tabId, e?.message || String(e)); }
   }
@@ -415,28 +422,119 @@ async function runGroup(id, force) {
   paint();
 }
 
-/* ---------- automatic summaries ---------- */
+/* ---------- keeping summaries up to date ---------- */
+// Summaries are rewritten only when you press Summarize, or by the interval refresh every
+// `settings.every` minutes. Between those, a tab that gives a change signal (a new address, a reload,
+// a title change with unread counts aside, or leaving it after working in it) is read once it settles,
+// and its summary is marked outdated if the page changed in a way that matters (AI.checkTab, no model
+// call). When Tab Desk opens, tabs visited since their last check are read too. Every Tab Desk page
+// records the signals, but only one acts on them (the full page when it is open).
+
+const LAST_REFRESH_KEY = 'aiLastRefresh';
+const marks = new Map();     // tab id -> { reason, due } change signal not acted on yet
+const checking = new Set();  // tab ids being read for a staleness check
+const sighted = new Set();   // tab ids this page has looked at since it opened
+const titles = new Map();    // tab id -> last title seen
+const activeIn = new Map();  // window id -> { tabId, since }
+let items = [], runner = false, autoTimer = null, lastRefresh = null;
+
+function mark(tabId, reason) {
+  marks.set(tabId, addMark(marks.get(tabId), reason));
+  kickAuto(REFRESH.settle + 100);
+}
+
+function watchTabs() {
+  chrome.tabs.onUpdated.addListener((id, info) => {
+    if (info.url) mark(id, 'nav');
+    else if (info.status === 'loading') mark(id, 'reload');
+    if (info.title != null) {
+      const before = titles.get(id);
+      titles.set(id, info.title);
+      if (before != null && stableTitle(before) !== stableTitle(info.title)) mark(id, 'title');
+    }
+    // Settled counts from when loading ends.
+    if (info.status === 'complete' && marks.has(id)) mark(id, marks.get(id).reason);
+  });
+  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+    const prev = activeIn.get(windowId), now = Date.now();
+    if (prev && prev.tabId !== tabId && now - prev.since >= REFRESH.worked) mark(prev.tabId, 'worked');
+    activeIn.set(windowId, { tabId, since: now });
+  });
+  chrome.tabs.onRemoved.addListener(id => { marks.delete(id); sighted.delete(id); titles.delete(id); });
+}
+
+/** Look again after `ms`, unless a pass is already due sooner. */
+function kickAuto(ms = 250) {
+  const at = Date.now() + ms;
+  if (autoTimer && autoTimer.at <= at) return;
+  clearTimeout(autoTimer?.id);
+  autoTimer = { at, id: setTimeout(() => { autoTimer = null; autoPass(); }, ms) };
+}
+
+/** May the interval refresh call a model now? Never downloads a model or uses the cloud without consent. */
+function refreshAllowed() {
+  const s = state.settings;
+  if (s.auto === 'off') return false;
+  const engine = chooseEngine({ kind: 'tab', setting: s.engine, local: state.local, hasKey: state.hasKey });
+  if (!engine) return false;
+  if (engine === 'local' && state.local !== 'available') return false;
+  if (engine === 'cloud' && (s.auto !== 'all' || !cloudConsent(s))) return false;
+  return true;
+}
+
+const liveTab = t => t.status === 'complete' && !t.discarded && !t.frozen && !t.incognito && isReadableUrl(urlOf(t));
 
 /**
- * Called after every refresh with all open tabs. In auto mode, queues tabs that have no
- * recent summary. Never downloads a model or sends anything to the cloud without consent.
+ * Called after every refresh with all open tabs. `run`: this page is the one that acts on change
+ * signals and runs the interval refresh.
  */
-export function noticeTabs(items) {
-  const s = state.settings;
-  if (!s.enabled || s.auto === 'off' || !state.access) return;
-  const engine = chooseEngine({ kind: 'tab', setting: s.engine, local: state.local, hasKey: state.hasKey });
-  if (!engine) return;
-  if (engine === 'local' && state.local !== 'available') return;
-  if (engine === 'cloud' && (s.auto !== 'all' || !cloudConsent(s))) return;
-  for (const { t } of items) {
-    const url = urlOf(t);
-    if (t.status !== 'complete' || t.discarded || t.frozen || t.incognito || !isReadableUrl(url)) continue;
-    if (queued.has(t.id) || busy.has(t.id) || tabErrors.has(t.id)) continue;
-    const ins = AI.tabInsight(url);
-    if (seen.get(t.id) === url && !needsInsight(ins)) continue;
-    seen.set(t.id, url);
-    enqueue(t.id, false);
+export function noticeTabs(list, { run = true } = {}) {
+  items = list;
+  runner = run;
+  for (const { t } of list) {
+    if (!titles.has(t.id)) titles.set(t.id, t.title || '');
+    if (t.active && activeIn.get(t.windowId)?.tabId !== t.id) activeIn.set(t.windowId, { tabId: t.id, since: t.lastAccessed || Date.now() });
   }
+  autoPass();
+}
+
+async function autoPass() {
+  const s = state.settings;
+  if (!runner || !s.enabled || !state.access) return;
+  const now = Date.now();
+  let next = Infinity;
+
+  // Change signals: read the tab and mark its summary outdated if the page changed.
+  for (const { t, owner } of items) {
+    if (!liveTab(t) || checking.has(t.id) || queued.has(t.id) || busy.has(t.id)) continue;
+    const m = marks.get(t.id);
+    const r = staleCheck({ ins: AI.tabInsight(urlOf(t)), mark: m, active: t.active, lastAccessed: t.lastAccessed, firstSight: !sighted.has(t.id), now });
+    sighted.add(t.id);
+    if (r.at) { next = Math.min(next, r.at); continue; }
+    if (!r.reason) { if (!r.waiting) marks.delete(t.id); continue; }
+    marks.delete(t.id);
+    checking.add(t.id);
+    AI.checkTab(t, { access: state.access, groupName: owner?.name ?? null })
+      .catch(e => console.warn('Check failed', e))
+      .finally(() => { checking.delete(t.id); paintTab(t.id); });
+  }
+
+  // Interval refresh: summarize again where the page changed (the model is skipped where it didn't).
+  if (refreshAllowed()) {
+    if (lastRefresh == null) {
+      // The first time, start counting now rather than summarizing every tab at once.
+      lastRefresh = (await chrome.storage.local.get(LAST_REFRESH_KEY))[LAST_REFRESH_KEY];
+      if (!lastRefresh) { lastRefresh = Date.now(); chrome.storage.local.set({ [LAST_REFRESH_KEY]: lastRefresh }); }
+    }
+    const due = nextRefreshAt(lastRefresh, s.every);
+    if (Date.now() >= due) {
+      lastRefresh = Date.now();
+      chrome.storage.local.set({ [LAST_REFRESH_KEY]: lastRefresh });
+      for (const { t } of items) if (liveTab(t) && !tabErrors.has(t.id)) enqueue(t.id, false);
+      next = Math.min(next, nextRefreshAt(lastRefresh, s.every));
+    } else next = Math.min(next, due);
+  }
+  if (next < Infinity) kickAuto(Math.max(1000, next - Date.now()));
 }
 
 /* ---------- painting ---------- */
@@ -470,6 +568,18 @@ function paintGroup(id) {
     if (!groupRuns.has(id) && !AI.groupInsight(g.name)) { el.remove(); return; }
     el.innerHTML = el.closest('.card') ? groupLineInner(g) : groupSumInner(g, true);
   });
+}
+
+const OUTDATED = 'Tabs in this group changed since this summary. Summarize again to update it.';
+const STALE = 'Outdated: the page changed since this summary. Summarize again to update it.';
+/** A group summary written before its tabs changed (tabs joined or left, or a tab got a new summary). */
+function isOutdated(g) {
+  return groupOutdated(AI.groupInsight(g.name), g.tabs.map(t => ({ url: urlOf(t), ins: AI.tabInsight(urlOf(t)) })));
+}
+/** "On-device · 2 h ago", plus when the page was last checked if that is later and nothing changed. */
+function writtenLine(ins) {
+  const checked = ins.checkedAt && ins.checkedAt - (ins.at || 0) > 60 * 1000 ? ` · checked ${ago(ins.checkedAt)}, no change` : '';
+  return `${engineLabel(ins)} · ${ago(ins.at)}${checked}`;
 }
 
 function ago(at) {
@@ -728,11 +838,13 @@ export async function openAiSettings(opts = {}) {
         ${state.local === 'downloadable' ? '<button class="btn sm" id="aiDownload" type="button">Download</button>' : ''}</div>
       <div class="ai-bar wide" id="aiDlBar" hidden><i></i></div>
 
-      <h3>Summarize tabs automatically</h3>
-      ${radio('aiAuto', 'local', s.auto, 'When it runs on this device', 'New and changed tabs get a summary in the background, using the on-device model only.')}
-      ${radio('aiAuto', 'all', s.auto, 'Always', 'Also uses your cloud key when the cloud is the engine for tabs. Each new page is sent to the cloud.')}
-      ${radio('aiAuto', 'off', s.auto, 'Off', 'Only when you press a summarize button.')}
-      ${!state.access ? '<div class="ai-muted ai-small">Automatic summaries need page access (see Privacy below).</div>' : ''}
+      <h3>Refresh summaries</h3>
+      <p class="ai-muted ai-small">When a page changes, its summary is marked outdated; it isn’t rewritten until you press Summarize or the refresh below runs.</p>
+      ${radio('aiAuto', 'local', s.auto, 'On a timer, on this device', 'Tabs that changed, or have no summary yet, are summarized on a timer with the on-device model only.')}
+      ${radio('aiAuto', 'all', s.auto, 'On a timer, any engine', 'Also uses your cloud key when the cloud is the engine for tabs. Changed pages are sent to the cloud.')}
+      ${radio('aiAuto', 'off', s.auto, 'Only when I press Summarize', 'Outdated summaries are still marked.')}
+      <label class="ai-field ai-every"><span>Refresh every (minutes)</span><input id="aiEvery" type="number" min="${EVERY_MIN}" max="${EVERY_MAX}" step="5" value="${s.every}" inputmode="numeric"></label>
+      ${!state.access ? '<div class="ai-muted ai-small">Refreshing and outdated marks need page access (see Privacy below).</div>' : ''}
 
       <h3>Cloud <span class="ai-muted">(optional)</span></h3>
       ${radio('aiCloud', 'gemini', s.cloud, 'Gemini API', 'Google’s Gemini, with your key from Google AI Studio.')}
@@ -968,6 +1080,7 @@ export async function openAiSettings(opts = {}) {
         tabLines: $b('#aiTabLines').checked,
         engine: box.querySelector('input[name=aiEngine]:checked')?.value || 'auto',
         auto: box.querySelector('input[name=aiAuto]:checked')?.value || 'local',
+        every: +$b('#aiEvery').value || state.settings.every,
         cloud: box.querySelector('input[name=aiCloud]:checked')?.value || 'gemini',
         model: $b('#aiModel-gemini').value.trim() || DEFAULT_MODEL,
         claudeModel: $b('#aiModel-claude').value.trim() || DEFAULT_CLAUDE_MODEL,

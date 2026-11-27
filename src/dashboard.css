@@ -409,6 +409,18 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 .ai-engine { font-size: 10.5px; font-weight: 600; letter-spacing: .02em; padding: 1px 6px; border-radius: 4px; color: var(--g-green); background: color-mix(in srgb, var(--g-green) 14%, transparent); white-space: nowrap; }
 .ai-engine.cloud { color: var(--g-blue); background: color-mix(in srgb, var(--g-blue) 14%, transparent); }
 .ai-when { font-size: 12px; color: var(--faint); }
+.ai-outdated { font-size: 11px; font-weight: 600; color: var(--g-orange); white-space: nowrap; }
+.ai-gline .ai-outdated { padding: 4px 4px 0 0; }
+.ai-sum.is-stale { color: var(--faint); }
+.ai-stale-tag { font-size: 10.5px; font-weight: 600; color: var(--g-orange); margin-right: 2px; }
+.ai-edge.is-stale { opacity: .45; background: repeating-linear-gradient(180deg, var(--s) 0 4px, transparent 4px 7px); }
+.ai-st.is-stale, .ai-dot-btn.is-stale { opacity: .55; }
+.card-head .ai-card-btn { flex: none; width: 26px; height: 26px; color: var(--faint); }
+.card-head .ai-card-btn svg { width: 15px; height: 15px; }
+.card-head .ai-card-btn:hover { color: var(--ink); background: var(--surface); }
+.card-head .ai-card-btn.is-outdated { color: var(--g-orange); }
+.ai-card-btn.is-busy svg { animation: edgepulse 1s ease-in-out infinite; }
+.ai-every { max-width: 200px; }
 .ai-tools { margin-left: auto; display: flex; gap: 2px; align-items: center; }
 .ai-tools .icon-btn { width: 28px; height: 28px; }
 .ai-tools .icon-btn svg { width: 15px; height: 15px; }

@@ -4,7 +4,7 @@ import {
   normalizeSettings, groupKey, instructionsFor, chooseEngine, cleanText, chunkText, langCode, isReadableUrl,
   tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError, cacheKey, pruneCache, renderSummary,
   DEFAULT_MODEL, MAX_INSTRUCTIONS, matchesPattern, compilePattern, suggestPattern, rulesFor, rollupStatus, normalizeStatus,
-  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, needsInsight, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
+  effectiveStatus, statusRank, oneSentence, parseInsight, insightKey, staleCheck, addMark, nextRefreshAt, stableTitle, stableText, contentSig, groupOutdated, REFRESH, EVERY_DEFAULT, headTail, INSIGHT_SCHEMA, PROMPT_VERSION,
   pickInstructions, baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   mergeRemote,
 } from '../src/lib/ai-core.js';
@@ -206,11 +206,82 @@ test('oneSentence and parseInsight keep one plain sentence', () => {
   assert.equal(insightKey('https://a.com/x?y=1#frag'), 'https://a.com/x?y=1');
 });
 
-test('needsInsight: missing or older than an hour', () => {
+test('staleCheck: only a summarized, not yet outdated tab is checked', () => {
+  const mark = { reason: 'nav', due: 0 };
+  assert.equal(staleCheck({ ins: null, mark, now: 1 }).reason, '');
+  assert.equal(staleCheck({ ins: { summary: 's', stale: true }, mark, now: 1 }).reason, '');
+});
+
+test('staleCheck: a change signal waits until the tab settles', () => {
+  const now = 1_000_000;
+  const mark = addMark(undefined, 'nav', now);
+  assert.equal(mark.due, now + REFRESH.settle);
+  assert.deepEqual(staleCheck({ ins: { summary: 's', at: now }, mark, now: now + 1000 }), { reason: '', at: mark.due });
+  assert.equal(staleCheck({ ins: { summary: 's', at: now }, mark, now: mark.due }).reason, 'nav');
+});
+
+test('staleCheck: on the active tab only navigation and reloads count; the rest waits until you leave', () => {
+  const ins = { summary: 's', at: 0 };
+  assert.deepEqual(staleCheck({ ins, mark: { reason: 'title', due: 0 }, active: true, now: 1 }), { reason: '', waiting: true });
+  assert.equal(staleCheck({ ins, mark: { reason: 'title', due: 0 }, active: false, now: 1 }).reason, 'title');
+  assert.equal(staleCheck({ ins, mark: { reason: 'reload', due: 0 }, active: true, now: 1 }).reason, 'reload');
+  assert.equal(staleCheck({ ins, mark: { reason: 'nav', due: 0 }, active: true, now: 1 }).reason, 'nav');
+});
+
+test('staleCheck: without signals a tab is left alone, except one visited since its last check when Tab Desk opens', () => {
   const now = 10_000_000;
-  assert.equal(needsInsight(null, { now }), true);
-  assert.equal(needsInsight({ at: now - 1000 }, { now }), false);
-  assert.equal(needsInsight({ at: now - 2 * 3600 * 1000 }, { now }), true);
+  const ins = { summary: 's', at: now - 60e3 };
+  assert.equal(staleCheck({ ins, now: now + 10 * 3600e3 }).reason, '');
+  assert.equal(staleCheck({ ins, lastAccessed: now - 1000, firstSight: true, now }).reason, 'visited');
+  assert.equal(staleCheck({ ins, lastAccessed: now - 1000, firstSight: false, now }).reason, '');
+  assert.equal(staleCheck({ ins, lastAccessed: now - 120e3, firstSight: true, now }).reason, '');
+});
+
+test('interval refresh: minutes setting, clamped, and when it is next due', () => {
+  assert.equal(normalizeSettings({}).every, EVERY_DEFAULT);
+  assert.equal(normalizeSettings({ every: '15' }).every, 15);
+  assert.equal(normalizeSettings({ every: 1 }).every, 5);
+  assert.equal(normalizeSettings({ every: 99999 }).every, 1440);
+  assert.equal(normalizeSettings({ every: 'soon' }).every, EVERY_DEFAULT);
+  assert.equal(nextRefreshAt(1000, 30), 1000 + 30 * 60e3);
+});
+
+test('addMark: the stronger reason wins and the wait restarts', () => {
+  const a = addMark(undefined, 'nav', 0);
+  const b = addMark(a, 'title', 1000);
+  assert.deepEqual(b, { reason: 'nav', due: 1000 + REFRESH.settle });
+  assert.equal(addMark({ reason: 'title', due: 0 }, 'worked', 0).reason, 'worked');
+});
+
+test('stableTitle drops unread counts in front', () => {
+  assert.equal(stableTitle('(3) Inbox - Gmail'), 'Inbox - Gmail');
+  assert.equal(stableTitle('[12+]  Chat'), 'Chat');
+  assert.equal(stableTitle('Release 2.0 notes'), 'Release 2.0 notes');
+});
+
+test('contentSig ignores numbers, times and spacing but not words', () => {
+  const a = contentSig({ title: '(1) PR #42', text: 'Opened 3 minutes ago\n12 comments' });
+  assert.equal(contentSig({ title: '(4) PR #42', text: 'Opened  5 minutes ago 13 comments' }), a);
+  assert.notEqual(contentSig({ title: 'PR #42', text: 'Merged 5 minutes ago 13 comments' }), a);
+  assert.equal(stableText('At 10:45, 1,234 views'), 'at #, # views');
+});
+
+test('groupOutdated: an outdated tab, tabs joining or leaving, or a newer tab summary', () => {
+  const g = { summary: 'x', at: 100, members: ['https://a.com/', 'https://b.com/'] };
+  const tabs = [{ url: 'https://a.com/#top', ins: { at: 50 } }, { url: 'https://b.com/', ins: { at: 90 } }];
+  assert.equal(groupOutdated(g, tabs), false);
+  assert.equal(groupOutdated(g, [tabs[0], { url: 'https://b.com/', ins: { at: 90, stale: true } }]), true);
+  assert.equal(groupOutdated(g, [...tabs, { url: 'https://c.com/' }]), true);
+  assert.equal(groupOutdated(g, tabs.slice(0, 1)), true);
+  assert.equal(groupOutdated(g, [tabs[0], { url: 'https://b.com/', ins: { at: 150 } }]), true);
+  assert.equal(groupOutdated({ summary: 'x', at: 100 }, [{ url: 'https://c.com/', ins: { at: 150 } }]), false);
+  assert.equal(groupOutdated(null, tabs), false);
+});
+
+test('pruneCache keeps a summary that was checked recently even if written long ago', () => {
+  const now = 1e12;
+  const out = pruneCache({ a: { at: now - 40 * 86400e3, checkedAt: now - 1000 }, b: { at: now - 40 * 86400e3 } }, now, 30 * 86400e3, 10);
+  assert.deepEqual(Object.keys(out), ['a']);
 });
 
 test('geminiRequest asks for JSON with a status enum when json is set', () => {

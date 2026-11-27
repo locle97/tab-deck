@@ -8,7 +8,7 @@ import {
   isReadableUrl, tabPrompt, groupPrompt, localContext, geminiRequest, parseSse, geminiError,
   baseTabPrompt, tabInstructionBlock, draftPrompt, cleanDraft, pickInstructions, INSTRUCTION_TEMPLATE, DEFAULT_TAB_INSTRUCTIONS,
   cacheKey, fnv, pruneCache, mergeRemote, ON_DEVICE_LANGS, MAX_GROUP_TABS, INSIGHT_SCHEMA, parseInsight, oneSentence,
-  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION,
+  insightKey, groupKey, normalizeStatus, INSIGHT_TTL, INSIGHT_MAX, headTail, PROMPT_VERSION, contentSig,
   sentencePrompt, SENTENCE_SCHEMA, templateSentence, STATUSES,
   CLOUDS, cloudModel, cloudConsent, consentKey, claudeRequest, claudeHeaders, parseClaudeSse, claudeError,
 } from './ai-core.js';
@@ -279,10 +279,15 @@ async function scheduleSave() {
     } while (dirty);
   } finally { saving = false; }
 }
-function putInsight(url, data) {
+/**
+ * Save a tab insight. `at` is when its summary was written, so it only moves with a new summary;
+ * `checkedAt` is when the page was last read and compared, with or without a new summary.
+ */
+function putInsight(url, data, { written = true } = {}) {
   const k = insightKey(url);
   const prev = insights[k] || {};
-  insights[k] = { ...prev, ...data, at: Date.now() };
+  const now = Date.now();
+  insights[k] = { ...prev, ...data, at: written || !prev.at ? now : prev.at, checkedAt: now };
   dirtyTabs.add(k);
   scheduleSave();
   emit();
@@ -603,12 +608,10 @@ export async function plannedEngine(kind) {
 }
 
 /**
- * Summarize one tab in one sentence and judge its status. The result is saved by URL.
- * opts: { groupName, force, signal, onProgress(fraction), access, engine? }
- * Skips the model when the page text and instructions haven't changed since the last summary.
- * Returns the saved insight: { summary, status, manual?, engine, at, reason, readable }.
+ * Read a tab and work out what its summary would be made from, and whether that differs from the
+ * saved one. Shared by summarizeTab and checkTab.
  */
-export async function summarizeTab(tab, opts = {}) {
+async function prepareTab(tab, opts) {
   await loadInsights();
   const st = await engineState();
   // Page fields and status rules (fields.js): when a rule or preset has them, read those values from the
@@ -627,11 +630,42 @@ export async function summarizeTab(tab, opts = {}) {
       status: decided && decided.status !== 'unknown' ? decided.status : null, ruleIndex: decided ? decided.index : -1,
     };
   }
-  if (!engine && !fieldInfo?.status) throw engineErr;
-  const sig = cacheKey([PROMPT_VERSION, engine, engine === 'cloud' ? `${st.settings.cloud}:${cloudModel(st.settings)}` : st.localApi, instructions, fnv(page.text), page.title,
-    fieldInfo ? [fieldInfo.values, fieldInfo.pattern, plan.rules] : null]);
+  const model = engine === 'cloud' ? `${st.settings.cloud}:${cloudModel(st.settings)}` : st.localApi;
+  // cfg: everything about how the summary is made. csig: what the page says, without numbers, times and
+  // unread counts. fsig: its page fields, which decide the status.
+  const cfg = cacheKey([PROMPT_VERSION, engine, model, instructions, fieldInfo ? [fieldInfo.pattern, plan.rules] : null]);
+  const csig = contentSig(page);
+  const fsig = fnv(JSON.stringify(fieldInfo?.values ?? null));
   const prev = tabInsight(page.url);
-  if (!opts.force && prev?.sig === sig && prev.summary) return putInsight(page.url, {});
+  // Summaries saved before cfg/csig existed carry one exact signature: honour it once, then move over.
+  const legacy = !!prev && !prev.cfg && prev.sig === cacheKey([PROMPT_VERSION, engine, model, instructions, fnv(page.text), page.title,
+    fieldInfo ? [fieldInfo.values, fieldInfo.pattern, plan.rules] : null]);
+  const exact = fnv(page.text + (fieldInfo ? JSON.stringify(fieldInfo.values) : ''));
+  const sameContent = legacy || (prev?.csig ? prev.csig === csig && prev.fsig === fsig : !!prev?.textSig && prev.textSig === exact);
+  return { st, plan, engine, engineErr, page, instructions, fieldInfo, cfg, csig, fsig, prev, sameCfg: prev?.cfg === cfg || legacy, sameContent };
+}
+
+/**
+ * Read a tab and mark its saved summary outdated (`stale: true`) when the page changed in a way that
+ * matters since it was written. Never calls a model. Returns the saved insight, or null if none.
+ */
+export async function checkTab(tab, opts = {}) {
+  const { page, prev, sameContent } = await prepareTab(tab, opts);
+  if (!prev?.summary) return null;
+  return putInsight(page.url, { stale: sameContent ? undefined : true }, { written: false });
+}
+
+/**
+ * Summarize one tab in one sentence and judge its status. The result is saved by URL.
+ * opts: { groupName, force, signal, onProgress(fraction), access, engine? }
+ * Skips the model when the page hasn't changed in a way that matters since the last summary (same
+ * settings, same text and title once numbers and times are taken out, same page fields).
+ * Returns the saved insight: { summary, status, manual?, engine, at, checkedAt, stale?, reason, readable }.
+ */
+export async function summarizeTab(tab, opts = {}) {
+  const { st, plan, engine, engineErr, page, instructions, fieldInfo, cfg, csig, fsig, prev, sameCfg, sameContent } = await prepareTab(tab, opts);
+  if (!engine && !fieldInfo?.status) throw engineErr;
+  if (!opts.force && prev?.summary && sameCfg && sameContent) return putInsight(page.url, { cfg, csig, fsig, stale: undefined }, { written: false });
   let r;
   if (fieldInfo?.status) {
     r = await fieldSentence(page, fieldInfo, instructions, engine, st, opts);
@@ -651,10 +685,9 @@ export async function summarizeTab(tab, opts = {}) {
   if (!r.summary) throw new AiError('The AI returned an empty summary.', 'empty');
   // A status set by hand was about the page as it was. The page has changed, so the new analysis wins:
   // otherwise a stale "Needs you" sits next to a summary that says the PR is merged.
-  const textSig = fnv(page.text + (fieldInfo ? JSON.stringify(fieldInfo.values) : ''));
-  const changed = prev && prev.textSig && prev.textSig !== textSig;
+  const changed = !!prev?.summary && !sameContent && !!(prev.csig || prev.textSig);
   return putInsight(page.url, {
-    summary: r.summary, status: r.status, facts: r.facts || '', engine: r.engine || engine, sig, textSig,
+    summary: r.summary, status: r.status, facts: r.facts || '', engine: r.engine || engine, cfg, csig, fsig, stale: undefined, sig: undefined, textSig: undefined,
     cloud: (r.engine || engine) === 'cloud' ? st.settings.cloud : undefined,
     reason: page.reason, readable: page.readable, title: page.title,
     statusFrom: fieldInfo?.status ? 'fields' : 'ai',
@@ -743,7 +776,9 @@ export async function summarizeGroup(group, opts = {}) {
   }
   const summary = oneSentence(text, 300);
   if (!summary) throw new AiError('The AI returned an empty summary.', 'empty');
-  groupInsights[groupKey(group.name)] = { summary, engine, ...(engine === 'cloud' ? { cloud: st.settings.cloud } : {}), sig, unreadable, skipped, at: Date.now() };
+  // members: every tab it was written from, so the dashboard can say when tabs joined or left (groupOutdated).
+  const members = group.tabs.map(t => insightKey(t.url || t.pendingUrl));
+  groupInsights[groupKey(group.name)] = { summary, engine, ...(engine === 'cloud' ? { cloud: st.settings.cloud } : {}), sig, members, unreadable, skipped, at: Date.now() };
   dirtyGroups.add(groupKey(group.name));
   scheduleSave();
   emit();
