@@ -314,6 +314,21 @@ try {
   });
   step('a page that changed after its summary is marked Outdated without a model call; Summarize clears it');
 
+  // Leaving a tab you were on summarizes it, so its status is current.
+  liveText = 'A third version: the build is running now.';
+  await pLive.reload();
+  await page.waitForSelector('.tab:has-text("/live") .ai-sum.is-stale', { timeout: 15000 });
+  const callsBeforeLeave = await page.evaluate(() => window.__ai.calls.length);
+  await pLive.bringToFront();
+  await pLive.waitForTimeout(5500);
+  await page.bringToFront();
+  await page.waitForFunction(() => {
+    const row = [...document.querySelectorAll('.tab')].find(r => r.textContent.includes('/live'));
+    return row?.querySelector('.ai-sum') && !row.querySelector('.ai-sum.is-stale');
+  }, null, { timeout: 20000 });
+  assert.ok(await page.evaluate(() => window.__ai.calls.length) > callsBeforeLeave, 'leaving the tab ran the model');
+  step('leaving a tab after a few seconds summarizes it again, so its status is up to date');
+
   // Dashboard: tab lines, status dots, group sentence and "most urgent first".
   await page.click('[data-nav=dashboard]');
   await page.waitForSelector('.card:has-text("Research") .ai-gtext');
@@ -321,6 +336,7 @@ try {
   assert.equal(await page.locator('.card-tab:has-text("/pr/5") .ai-edge.st-action').count(), 1);
   assert.match(await page.textContent('.card:has-text("Research") .card-head'), /Need action/);
   assert.ok(await page.isVisible('.card:has-text("Research") .card-head [data-act=ai-group]'), 'Summarize sits in the card header');
+  assert.match(await page.textContent('.dash-bar .ai-next'), /^Next refresh in \d+ min$/, 'countdown to the next refresh in the header');
   assert.equal(await page.locator('text=Tabs changed').count(), 0, 'groups show no "Tabs changed"; only tabs show Outdated');
   assert.ok(await page.isVisible('.card:has-text("Research") .st-bar'));
   assert.ok(await page.isVisible('.card.needs-you:has-text("Research")'));
@@ -560,8 +576,8 @@ try {
   await page.click('[role=tab][data-tab=general]');
   await page.uncheck('#aiEnabled');
   await page.click('[data-m=ok]');
-  await page.waitForFunction(() => !document.querySelector('[data-act=ai-group]'));
-  assert.equal(await page.locator('.ai-line, .ai-st, [data-act=ai-tab]').count(), 0);
+  // On the Inbox there is no group button, so wait for the tab lines and statuses themselves to go.
+  await page.waitForFunction(() => !document.querySelector('[data-act=ai-group], .ai-line, .ai-st, [data-act=ai-tab]'), null, { timeout: 5000 });
   step('turning AI summaries off hides summaries, statuses and buttons');
 
   assert.deepEqual(errors, []);

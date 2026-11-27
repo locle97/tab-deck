@@ -272,17 +272,17 @@ export const INSIGHT_MAX = 1000;
 /* ---------- keeping summaries up to date ---------- */
 // Summaries are written when you press Summarize, or by the interval refresh every `every` minutes
 // (settings). Between those, a tab that gives a change signal (new address, reload, title change,
-// leaving it after working in it) is read once it settles and compared with its summary. Reading
+// leaving it) is read once it settles and compared with its summary. Reading
 // costs no model call; when the page changed in a way that matters (contentSig), the summary is
 // marked outdated instead of being rewritten.
 
 export const REFRESH = {
   settle: 5000,        // quiet time after the last signal before the tab is read
-  worked: 30 * 1000,   // active this long, then left: you probably changed something there
+  left: 5 * 1000,      // active at least this long, then left: summarize it so its status is current
 };
 /** Signals that count even while you are on the tab. A title change waits until you leave it. */
 const URGENT = new Set(['nav', 'reload']);
-const RANK = { title: 1, worked: 2, reload: 3, nav: 4 };
+const RANK = { title: 1, reload: 2, nav: 3, left: 4 };
 
 /** Merge a new change signal into a tab's pending one: the stronger reason wins, the wait restarts. */
 export function addMark(prev, reason, now = Date.now()) {
