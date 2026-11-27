@@ -16,8 +16,8 @@
   /* Chrome tab group colors, light */
   --g-grey: #5f6368; --g-blue: #1a73e8; --g-red: #d93025; --g-yellow: #e8a200;
   --g-green: #188038; --g-pink: #d01884; --g-purple: #a142f4; --g-cyan: #007b83; --g-orange: #e8710a;
-  /* Text on a solid group color: white on the deep colors, dark on yellow and orange (contrast >= 4.5:1). */
-  --on-g: #ffffff; --on-g-warm: #1b1f26;
+  /* How much of the group color goes into a card header (the rest is the surface). */
+  --head-mix: 30%;
   --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -28,7 +28,7 @@
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
     --g-grey: #bdc1c6; --g-blue: #8ab4f8; --g-red: #f28b82; --g-yellow: #fdd663;
     --g-green: #81c995; --g-pink: #ff8bcb; --g-purple: #c58af9; --g-cyan: #78d9ec; --g-orange: #fcad70;
-    --on-g: #101317; --on-g-warm: #101317;
+    --head-mix: 34%;
     color-scheme: dark;
   }
 }
@@ -38,7 +38,7 @@
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
   --g-grey: #bdc1c6; --g-blue: #8ab4f8; --g-red: #f28b82; --g-yellow: #fdd663;
   --g-green: #81c995; --g-pink: #ff8bcb; --g-purple: #c58af9; --g-cyan: #78d9ec; --g-orange: #fcad70;
-  --on-g: #101317; --on-g-warm: #101317;
+  --head-mix: 34%;
   color-scheme: dark;
 }
 
@@ -225,12 +225,9 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 
 /* Card hierarchy: 1 name + status pill (the only bold text), 2 summary line, 3 tab rows, 4 footer. */
 .card { position: relative; display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; transition: opacity .15s; }
-/* The header is the group's own Chrome color, solid, so a card matches its tab strip chip at a glance. */
-.card { --on-c: var(--on-g); }
-.card[data-color="yellow"], .card[data-color="orange"] { --on-c: var(--on-g-warm); }
-.card-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px; padding: 6px 8px 6px 14px; background: var(--c); color: var(--on-c); }
-.card-head :focus-visible { outline-color: var(--on-c); }
-.card-name { flex: 0 1 auto; min-width: 0; padding: 2px 0; border: 0; background: transparent; font-size: 15px; font-weight: 650; letter-spacing: -.01em; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--on-c); }
+/* The header is a clear tint of the group's Chrome color, so a card matches its tab strip chip at a glance. */
+.card-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px; padding: 6px 8px 6px 14px; background: color-mix(in srgb, var(--c) var(--head-mix), var(--surface)); }
+.card-name { flex: 0 1 auto; min-width: 0; padding: 2px 0; border: 0; background: transparent; font-size: 15px; font-weight: 650; letter-spacing: -.01em; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
 .card-name:hover { text-decoration: underline; text-underline-offset: 3px; }
 /* Status pill sits on a surface chip so its own color never fights the header color. */
 .card-head .ai-st { background: var(--surface); }
@@ -239,10 +236,10 @@ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: -.02em; line-
 /* Right-hand tools (window tag, Summarize, More) never shrink; the name truncates instead. */
 .card-tools { flex: none; display: flex; align-items: center; gap: 2px; margin-left: auto; }
 .card-tools .win-tag { margin-right: 4px; }
-.card-tools .icon-btn, .card-tools .win-tag { color: var(--on-c); opacity: .85; }
-.card-tools .icon-btn:hover { color: var(--on-c); opacity: 1; }
+.card-tools .icon-btn, .card-tools .win-tag { color: var(--muted); }
+.card-tools .icon-btn:hover { color: var(--ink); }
 .card-tools .icon-btn { width: 28px; height: 28px; }
-.card-tools .icon-btn:hover { background: color-mix(in srgb, var(--on-c) 16%, transparent); }
+.card-tools .icon-btn:hover { background: color-mix(in srgb, var(--ink) 10%, transparent); }
 .btn.sm { padding: 4px 9px; font-size: 12.5px; border-radius: 7px; }
 .btn.sm svg { width: 13px; height: 13px; }
 .card-body { display: flex; flex-direction: column; gap: 4px; padding: 8px 8px 4px 8px; min-width: 0; }
