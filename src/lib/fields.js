@@ -3,13 +3,13 @@
 // Pure helpers only (no chrome.* here), so they can be unit tested in Node.
 //
 // Fields, one per line:            Status rules, one per line, first match wins:
-//   state: .State                    done when state matches /merged|closed/
+//   state: .State                    idle when state matches /merged|closed/
 //   viewer: meta[name=user-login] @content
 //   reviewers[]: .reviewer .name     action when reviewers has {viewer}   (has: a whole word or item, not part of one)
 //   status: label: Status            working when status is In progress
 //                                    info otherwise
 
-import { STATUSES, STATUS_ORDER, mostSpecificRule } from './ai-core.js';
+import { STATUSES, STATUS_ORDER, LEGACY_STATUS, mostSpecificRule } from './ai-core.js';
 
 export const MAX_FIELDS = 20;
 export const MAX_FIELD_VALUE = 200;
@@ -71,7 +71,11 @@ function isSelector(sel) {
 const STATUS_WORDS = (() => {
   const m = {};
   for (const k of STATUS_ORDER) { m[k] = k; m[STATUSES[k].label.toLowerCase()] = k; }
-  Object.assign(m, { 'needs-you': 'action', 'in-progress': 'working', reference: 'info', unknown: 'unknown', ai: 'unknown' });
+  Object.assign(m, {
+    'need-action': 'action', reference: 'info', unknown: 'unknown', ai: 'unknown',
+    // Names from older versions, so rules written before still work.
+    ...LEGACY_STATUS, 'needs you': 'action', 'needs-you': 'action', 'in progress': 'working', 'in-progress': 'working',
+  });
   return m;
 })();
 
@@ -86,7 +90,8 @@ const OPS = [
 
 /**
  * Parse status rules. Each line is `<status> when <condition> [and <condition>…]` or `<status> otherwise`.
- * Status: action/working/waiting/done/info, or their labels (Needs you, In progress, Waiting, Done, Reference),
+ * Status: action/working/idle/info, or their labels (Need action, Working, Idle, Reference),
+ * older names (Needs you, In progress, Waiting → Working, Done → Idle),
  * or `ai` to let the AI decide. Condition: `<field> <op> <value>` with op one of
  * is, is not, contains, does not contain, has, does not have (list items), matches /re/, does not match, is empty, is not empty.
  * A value can use {field} to compare with another field, e.g. `reviewers has {viewer}`.
@@ -236,14 +241,14 @@ export const PRESETS = [
       'ci: link[rel~="icon"][href*="favicon"] @href',
     ].join('\n'),
     statusRules: [
-      'done when state matches /merged|closed/',
-      'needs you when requested has {viewer}',
-      'in progress when state is draft and author is {viewer}',
-      'needs you when author is {viewer} and mergebox matches /changes requested|conflict|not successful|failing|failed/',
-      'needs you when author is {viewer} and ci contains failure',
-      'needs you when author is {viewer} and mergebox matches /ready to merge|can be merged|all checks have passed/ and mergebox does not match /review required|changes requested|blocked/',
-      'waiting when author is {viewer}',
-      'waiting when reviews has {viewer}',
+      'idle when state matches /merged|closed/',
+      'need action when requested has {viewer}',
+      'working when state is draft and author is {viewer}',
+      'need action when author is {viewer} and mergebox matches /changes requested|conflict|not successful|failing|failed/',
+      'need action when author is {viewer} and ci contains failure',
+      'need action when author is {viewer} and mergebox matches /ready to merge|can be merged|all checks have passed/ and mergebox does not match /review required|changes requested|blocked/',
+      'working when author is {viewer}',
+      'working when reviews has {viewer}',
       'reference otherwise',
     ].join('\n'),
   },
@@ -258,13 +263,13 @@ export const PRESETS = [
       'failed[]: [aria-label*="failed" i] @aria-label',
     ].join('\n'),
     statusRules: [
-      'in progress when status matches /queued|in progress|waiting|pending|requested/',
-      'needs you when status matches /failure|failed|timed out|startup failure|action required/',
-      'done when status matches /success|skipped|neutral/',
-      'reference when status matches /cancel/',
-      'in progress when ci contains pending',
-      'needs you when ci contains failure',
-      'done when ci contains success',
+      'working when status matches /queued|in progress|waiting|pending|requested/',
+      'need action when status matches /failure|failed|timed out|startup failure|action required/',
+      'idle when status matches /success|skipped|neutral/',
+      'idle when status matches /cancel/',
+      'working when ci contains pending',
+      'need action when ci contains failure',
+      'idle when ci contains success',
       'ai otherwise',
     ].join('\n'),
   },

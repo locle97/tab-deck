@@ -63,13 +63,13 @@ test('parseClaudeSse collects text deltas across chunks and spots refusals and e
   const ev = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
   const all = ev('message_start', { message: {} }) + ev('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
     + ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: '{"facts": "", "summary": "A Claude' } })
-    + ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: ' sentence.", "status": "done"}' } })
+    + ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: ' sentence.", "status": "idle"}' } })
     + ev('content_block_stop', { index: 0 }) + ev('message_delta', { delta: { stop_reason: 'end_turn' } }) + ev('message_stop', {});
   const cut = all.length - 120;
   const a = parseClaudeSse(all.slice(0, cut));
   const b = parseClaudeSse(a.rest + all.slice(cut));
   const text = [...a.texts, ...b.texts].join('');
-  assert.deepEqual(parseInsight(text), { summary: 'A Claude sentence.', status: 'done' });
+  assert.deepEqual(parseInsight(text), { summary: 'A Claude sentence.', status: 'idle' });
   assert.equal(a.blocked || b.blocked, null);
   assert.equal(parseClaudeSse(ev('message_delta', { delta: { stop_reason: 'refusal' } })).blocked, 'refusal');
   assert.deepEqual(parseClaudeSse(ev('error', { error: { type: 'overloaded_error', message: 'Overloaded' } })).error, { type: 'overloaded_error', message: 'Overloaded' });
